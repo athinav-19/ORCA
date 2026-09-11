@@ -1,0 +1,39 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Logs and temporary execution outputs
+*.log
+logs/
+
+# IDE and editor settings
+.vscode/
+.idea/
+
+# Local cache and persistence stores
+data/copernicus_cache/
+data/mosdac_cache/
+data/satellite_idempotency_store.json*
+
+# Local credentials and configuration directories
+.copernicusmarine/
+.credentials/
+config.json
+
+# OS specific files
+.DS_Store
+Thumbs.db
