@@ -182,39 +182,6 @@ class OceanAgent:
             "timestamps": [f"+{h:02d}:00h" for h in range(steps)],
         }
 
-    def generate_mock_timeseries(self, location: str, time_frame: str, steps: int = 24) -> Dict[str, Any]:
-        """
-        Generates simulated hourly oceanographic data arrays for 24 hours.
-        """
-        seed_val = sum(ord(c) for c in (location or "ocean")) % 1000
-        rng = np.random.default_rng(seed_val)
-
-        hours = np.arange(steps)
-        diurnal_cycle = 0.4 * np.sin(2 * np.pi * hours / 12)
-
-        base_wave = 1.4 + (seed_val % 5) * 0.15
-        wave_heights = np.clip(
-            np.round(base_wave + diurnal_cycle + rng.normal(0, 0.15, steps), 2),
-            0.5,
-            6.0,
-        )
-
-        base_current = 0.9 + (seed_val % 4) * 0.2
-        current_speeds = np.clip(
-            np.round(base_current + 0.3 * np.cos(2 * np.pi * hours / 12) + rng.normal(0, 0.1, steps), 2),
-            0.1,
-            4.5,
-        )
-
-        swell_periods = np.round(8.0 + diurnal_cycle * 2 + rng.normal(0, 0.3, steps), 1)
-        timestamps = [f"+{h:02d}:00h" for h in range(steps)]
-
-        return {
-            "timestamps": timestamps,
-            "wave_height_m": wave_heights.tolist(),
-            "current_speed_knots": current_speeds.tolist(),
-            "swell_period_s": swell_periods.tolist(),
-        }
 
     def sliding_window_anomaly(
         self, data_series: List[float], window_size: int = 3, jump_threshold: float = 0.65
@@ -244,47 +211,100 @@ class OceanAgent:
 
     def execute_task(
         self,
-        location: str,
-        time_frame: str,
-        task_instructions: str,
-        expected_format: str,
-        persona: str,
+        location: Any,
+        time_frame: str = "today",
+        task_instructions: str = "",
+        expected_format: str = "RAW_TIMESERIES",
+        persona: str = "FISHERMAN",
     ) -> Dict[str, Any]:
         """
         Executes domain task and formats deterministic result based on stakeholder persona.
         """
-        location_clean = location.strip() if location else "Coastal Sector"
-        time_frame_clean = time_frame.strip() if time_frame else "Current Window"
-        format_upper = expected_format.strip().upper() if expected_format else "RAW_TIMESERIES"
-        persona_upper = persona.strip().upper() if persona else "UNKNOWN"
+        time_frame_clean = (time_frame or "Current Window").strip()
+        format_upper = (expected_format or "RAW_TIMESERIES").strip().upper()
+        persona_upper = (persona or "UNKNOWN").strip().upper()
 
-        lat_map = {"thoothukudi": 8.76, "rameswaram": 9.28, "chennai": 13.08, "kochi": 9.93}
-        target_lat = 10.0
-        target_lon = 78.5
-        if location_clean and "," in location_clean:
-            try:
-                p = location_clean.split(",")
-                target_lat, target_lon = float(p[0].strip()), float(p[1].strip())
-            except (ValueError, IndexError):
-                pass
-        else:
-            loc_lower = location_clean.lower()
-            for k, v in lat_map.items():
-                if k in loc_lower:
-                    target_lat = v
-                    target_lon = 78.13 if "thoo" in k else (79.31 if "ram" in k else (80.27 if "chen" in k else 76.26))
-                    break
+        from gis_agent import GisAgent
+        sec = GisAgent().resolve_location(location)
+        loc_name = sec.get("name") if not sec.get("is_unknown") else (str(location) if location else "Location Required")
+        loc_str = str(loc_name)
+
+        if sec.get("is_unknown") or sec.get("lat") is None or sec.get("lon") is None:
+            return {
+                "agent": "OCEAN_AGENT",
+                "location": {
+                    "name": loc_name,
+                    "latitude": None,
+                    "longitude": None,
+                },
+                "location_name": loc_str,
+                "time_frame": time_frame_clean,
+                "format": format_upper,
+                "status": "LOCATION_REQUIRED",
+                "error": "LOCATION_REQUIRED",
+                "summary": f"Geographic location '{loc_name}' is required to fetch oceanographic data.",
+                "advisory": "Please specify a recognized coastal port or valid GPS coordinates.",
+                "wave_height_m": 0.0,
+                "is_live_satellite": False,
+                "data": {},
+                "key_metrics": {},
+            }
+
+        target_lat = float(sec["lat"])
+        target_lon = float(sec["lon"])
+
+        loc_dict = {
+            "name": loc_name,
+            "latitude": target_lat,
+            "longitude": target_lon,
+        }
 
         # 1. Check ISRO MOSDAC Shadow Cache (.nc / .h5)
         cached_data = self.load_cached_netcdf(target_lat, target_lon)
-        if cached_data is not None:
-            timeseries = cached_data
-            data_source = f"ISRO MOSDAC Shadow Cache ({cached_data['source_file']})"
-            is_live_satellite = True
-        else:
-            timeseries = self.generate_mock_timeseries(location_clean, time_frame_clean)
-            data_source = "Fallback Ensemble Model (ISRO MOSDAC Satellite Cache Pending Sync)"
-            is_live_satellite = False
+        if cached_data is None:
+            return {
+                "agent": "OCEAN_AGENT",
+                "location": loc_dict,
+                "location_name": loc_str,
+                "time_frame": time_frame_clean,
+                "format": format_upper,
+                "status": "DATA_UNAVAILABLE",
+                "error": "DATA_UNAVAILABLE",
+                "summary": (
+                    f"Oceanographic telemetry for {loc_str} is currently unavailable. "
+                    "ISRO MOSDAC SARAL-AltiKa radar altimeter shadow cache is pending synchronization."
+                ),
+                "advisory": (
+                    "Live altimeter significant wave height and current data are not currently cached for this coordinate. "
+                    "Exercise marine caution until local in-situ or satellite telemetry is synced."
+                ),
+                "wave_height_m": None,
+                "is_live_satellite": False,
+                "data": {
+                    "hourly_timestamps": [],
+                    "wave_height_m": [],
+                    "current_speed_knots": [],
+                    "swell_period_s": [],
+                    "statistics": {
+                        "max_wave_height_m": None,
+                        "mean_wave_height_m": None,
+                        "max_current_speed_knots": None,
+                        "mean_current_speed_knots": None,
+                        "anomalies_detected": 0,
+                    },
+                    "detected_anomalies": [],
+                },
+                "key_metrics": {},
+                "metadata": {
+                    "source": "DATA_UNAVAILABLE",
+                    "is_live_satellite": False,
+                    "cache_status": "PENDING_SYNC_ISRO_MOSDAC_SARAL_ALTIKA_KA_BAND",
+                },
+            }
+
+        timeseries = cached_data
+        data_source = f"ISRO MOSDAC Shadow Cache ({cached_data['source_file']})"
+        is_live_satellite = True
 
         wave_arr = timeseries["wave_height_m"]
         current_arr = timeseries["current_speed_knots"]
@@ -306,7 +326,8 @@ class OceanAgent:
         if format_upper in ("RAW_TIMESERIES", "FORMAT_1", "FORMAT1") or format_upper not in ("BINARY_ADVISORY", "TEXT_SUMMARY"):
             return {
                 "agent": "OCEAN_AGENT",
-                "location": location_clean,
+                "location": loc_dict,
+                "location_name": loc_str,
                 "time_frame": time_frame_clean,
                 "format": "RAW_TIMESERIES",
                 "status": "SAFE" if is_safe else "WARNING",
@@ -355,7 +376,8 @@ class OceanAgent:
 
             return {
                 "agent": "OCEAN_AGENT",
-                "location": location_clean,
+                "location": loc_dict,
+                "location_name": loc_str,
                 "time_frame": time_frame_clean,
                 "format": "BINARY_ADVISORY",
                 "status": status,
@@ -385,12 +407,13 @@ class OceanAgent:
 
         return {
             "agent": "OCEAN_AGENT",
-            "location": location_clean,
+            "location": loc_dict,
+            "location_name": loc_str,
             "time_frame": time_frame_clean,
             "format": "TEXT_SUMMARY",
             "status": "SAFE" if is_safe else "WARNING",
             "summary": (
-                f"Ocean conditions for {location_clean} ({time_frame_clean}): "
+                f"Ocean conditions for {loc_str} ({time_frame_clean}): "
                 f"Significant wave height averages {mean_wave}m (peak {max_wave}m). "
                 f"Surface currents average {mean_current} knots (max {max_current} knots). "
                 f"Condition: {'FAVORABLE' if is_safe else 'MODERATE ROUGHNESS'}. "

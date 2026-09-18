@@ -1,0 +1,136 @@
+{
+  "best_model": "XGBoost",
+  "metrics_summary": {
+    "recall": 0.9455,
+    "precision": 0.7666,
+    "f1": 0.8467,
+    "roc_auc": 0.9355,
+    "pr_auc": 0.9437,
+    "confusion_matrix": [
+      [
+        224,
+        95
+      ],
+      [
+        18,
+        312
+      ]
+    ]
+  },
+  "all_benchmarks": {
+    "Persistence_Baseline": {
+      "recall": 0.9545,
+      "precision": 0.7797,
+      "f1": 0.8583,
+      "roc_auc": 0.8378,
+      "pr_auc": 0.7674,
+      "confusion_matrix": [
+        [
+          230,
+          89
+        ],
+        [
+          15,
+          315
+        ]
+      ]
+    },
+    "LightGBM": {
+      "recall": 0.8848,
+      "precision": 0.7745,
+      "f1": 0.826,
+      "roc_auc": 0.934,
+      "pr_auc": 0.9421,
+      "confusion_matrix": [
+        [
+          234,
+          85
+        ],
+        [
+          38,
+          292
+        ]
+      ]
+    },
+    "XGBoost": {
+      "recall": 0.9455,
+      "precision": 0.7666,
+      "f1": 0.8467,
+      "roc_auc": 0.9355,
+      "pr_auc": 0.9437,
+      "confusion_matrix": [
+        [
+          224,
+          95
+        ],
+        [
+          18,
+          312
+        ]
+      ]
+    },
+    "RandomForest": {
+      "recall": 0.9303,
+      "precision": 0.7832,
+      "f1": 0.8504,
+      "roc_auc": 0.9423,
+      "pr_auc": 0.9493,
+      "confusion_matrix": [
+        [
+          234,
+          85
+        ],
+        [
+          23,
+          307
+        ]
+      ]
+    }
+  },
+  "regional_diagnostics": {
+    "Arabian_Sea": {
+      "samples": 256,
+      "hazard_samples": 103,
+      "recall": 0.9515,
+      "precision": 0.6203,
+      "f1": 0.751
+    },
+    "Bay_of_Bengal": {
+      "samples": 393,
+      "hazard_samples": 227,
+      "recall": 0.9427,
+      "precision": 0.8594,
+      "f1": 0.8992
+    }
+  },
+  "seasonal_diagnostics": {
+    "Pre_Monsoon": {
+      "samples": 42,
+      "hazard_samples": 4,
+      "recall": 1.0,
+      "precision": 0.3077,
+      "f1": 0.4706
+    },
+    "Monsoon": {
+      "samples": 262,
+      "hazard_samples": 138,
+      "recall": 0.913,
+      "precision": 0.8456,
+      "f1": 0.878
+    },
+    "Post_Monsoon": {
+      "samples": 309,
+      "hazard_samples": 188,
+      "recall": 0.9681,
+      "precision": 0.7429,
+      "f1": 0.8406
+    },
+    "Winter": {
+      "samples": 36,
+      "hazard_samples": 0,
+      "recall": 0.0,
+      "precision": 0.0,
+      "f1": 0.0
+    }
+  }
+}

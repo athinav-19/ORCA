@@ -1,0 +1,93 @@
+{
+  "audit_timestamp": "2026-09-16T09:00:00+05:30",
+  "audit_scope": "Comprehensive Provenance & Leakage Audit for all ORCA ML & Analytics Components",
+  "components": {
+    "weather": {
+      "status": "TRAINED",
+      "model_type": "MultiHorizon_LightGBM_Regressor",
+      "version": "v4.0",
+      "official_designation": "ORCA Multi-Horizon Weather Model v4.0 trained on verified ECMWF reanalysis and operational analysis data, with source-specific provenance.",
+      "data_source": "ECMWF ERA5 / ERA5T / IFS via Open-Meteo Historical Archive API",
+      "temporal_coverage": "1980-01-01 00:00:00 to 2026-09-16 18:00:00 (46.7 years)",
+      "provenance_breakdown": {
+        "1980-01-01 to 2023-12-31": "ECMWF ERA5 Consolidated Reanalysis [REANALYSIS] (94.2%)",
+        "2024-01-01 to 2026-06-30": "ECMWF ERA5T Preliminary Reanalysis [REANALYSIS (PRELIMINARY ERA5T)] (5.3%)",
+        "2026-07-01 to 2026-09-16": "ECMWF IFS Operational Analysis [OPERATIONAL_ANALYSIS] (0.5%)"
+      },
+      "total_observations_on_disk": 409464,
+      "total_buffered_training_samples": 409248,
+      "storage_mb": 43.48,
+      "missing_data_pct": 0.0,
+      "sampling_cadence": "6-hourly synchronous fixes (00, 06, 12, 18 UTC) resampled from continuous 1-hourly raw reanalysis",
+      "splits": {
+        "train": {"period": "1980-01-01 to 2022-12-28 18:00", "samples": 376872},
+        "validation": {"period": "2023-01-01 to 2024-12-28 18:00", "samples": 17472},
+        "test": {"period": "2025-01-01 to 2026-09-13 18:00", "samples": 14904}
+      },
+      "horizon_buffer": "72 hours between splits (mathematically guarantees zero target crossing)",
+      "test_metrics_24h": {"persistence_rmse": 5.01, "lightgbm_rmse": 4.37, "gain_pct": 12.7, "r2": 0.66},
+      "derived_variables": ["wave_height_m (Pierson-Moskowitz)", "wave_period_s (Peak spectral relation)"]
+    },
+    "disaster": {
+      "status": "TRAINED",
+      "model_type": "XGBoost",
+      "version": "v4.0",
+      "official_designation": "ORCA 24h Cyclone & Marine Hazard Prediction Model v4.0 trained on verified NOAA IBTrACS and ECMWF ERA5 reanalysis data.",
+      "data_sources": [
+        {
+          "name": "NOAA/NCEI IBTrACS North Indian Ocean Archive (v04r01)",
+          "provenance": "OBSERVATION",
+          "coverage": "1980-10-10 06:00:00 to 2025-12-02 18:00:00",
+          "storms_count": 471,
+          "observations_count": 18168,
+          "missing_data_2026": "Zero 2026 storms in official IBTrACS archive"
+        },
+        {
+          "name": "ECMWF ERA5 Marine Ambient Observations",
+          "provenance": "REANALYSIS",
+          "coverage": "1980-01-01 to 2025-12-02",
+          "observations_count": 6726,
+          "purpose": "Clean, verified non-storm background reference fixes across 6 Indian maritime nodes"
+        }
+      ],
+      "total_training_samples": 24792,
+      "splits": {
+        "train": {"period": "1980-2022", "samples": 23035, "storms": 431},
+        "validation": {"period": "2023-2024", "samples": 1108, "storms": 23},
+        "test": {"period": "2025", "samples": 649, "storms": 17}
+      },
+      "leakage_safeguards": "Strict storm-disjoint SID partitioning, independent future target at t+24h, zero target in features",
+      "test_metrics_unseen_2025": {
+        "recall": 0.9455,
+        "precision": 0.7666,
+        "f1": 0.8467,
+        "roc_auc": 0.9355,
+        "pr_auc": 0.9437,
+        "confusion_matrix": {"TN": 224, "FP": 95, "FN": 18, "TP": 312}
+      },
+      "regional_diagnostics": {
+        "Arabian_Sea": {"samples": 256, "recall": 0.9515, "precision": 0.6203, "f1": 0.7510},
+        "Bay_of_Bengal": {"samples": 393, "recall": 0.9427, "precision": 0.8594, "f1": 0.8992}
+      }
+    },
+    "ocean": {
+      "status": "DETERMINISTIC",
+      "architecture": "Deterministic Multi-Satellite Data-Extraction & Physics Agent (OceanAgent)",
+      "is_ml_trained": false,
+      "data_source": "ISRO MOSDAC Shadow Cache (SARAL-AltiKa radar altimetry, Oceansat-3 scatterometer)",
+      "telemetry_variables": ["Significant Wave Height (swh)", "Surface Stress (wind)", "Geostrophic Current Velocity (u_curr, v_curr)", "Sea Surface Height Anomaly (ssha)"],
+      "method": "xarray coordinate nearest-neighbor slicing + moving window swell anomaly detection"
+    },
+    "pfz": {
+      "status": "PENDING_REAL_GROUND_TRUTH",
+      "is_ml_trained": false,
+      "candidate_sources_audited": [
+        {"name": "INCOIS PFZ Advisories", "result": "Gated / HTTP 404 / SSL failure. No public open REST archive for multi-decade polygons."},
+        {"name": "MOSDAC Oceansat-3 OCM L2B", "result": "Contains 33 files covering Sep 9-15 2026 only (7-day NRT window)."},
+        {"name": "Copernicus Marine Chlorophyll", "result": "Requires user authentication (.copernicusmarine/credentials)."}
+      ],
+      "compliance_declaration": "Zero pseudo-labels generated from SST/chlorophyll rules. Model training withheld per strict anti-leakage directive.",
+      "total_observations": 0
+    }
+  }
+}

@@ -19,11 +19,15 @@ from typing import Dict, Any, Optional, List
 
 try:
     from shapely.geometry import shape, Point, LineString, Polygon
+    from shapely.ops import unary_union
+    from shapely.prepared import prep
 except ImportError:
     shape = None
     Point = None
     LineString = None
     Polygon = None
+    unary_union = None
+    prep = None
 
 # Peninsular Indian Mainland Core Landmask Polygon (Coastal Landmasking)
 # Prohibits direct overland nautical routing between Western and Eastern coastlines
@@ -35,8 +39,15 @@ if Polygon:
         [79.5, 12.5], [79.8, 14.0], [80.5, 16.0], [81.5, 17.5],
         [78.0, 19.5], [75.0, 19.5], [73.5, 18.5]
     ])
+    SRI_LANKA_LANDMASK = Polygon([
+        [79.8, 9.8], [80.3, 9.8], [80.9, 9.3], [81.3, 8.6],
+        [81.9, 7.5], [81.8, 6.9], [81.3, 6.2], [80.6, 5.9],
+        [80.1, 6.0], [79.8, 6.9], [79.8, 8.0], [79.7, 9.0],
+        [79.8, 9.8]
+    ])
 else:
     PENINSULA_CORE_LANDMASK = None
+    SRI_LANKA_LANDMASK = None
 
 
 class GisAgent:
@@ -64,6 +75,7 @@ class GisAgent:
         "malvan": {"lat": 16.0667, "lon": 73.4667, "imbl_dist_nm": 155.0, "border_zone": "Arabian Sea EEZ (Konkan Coast)"},
 
         # --- GOA SECTORS ---
+        "goa": {"lat": 15.4120, "lon": 73.8050, "imbl_dist_nm": 160.0, "border_zone": "Arabian Sea EEZ (Goa Coast)"},
         "mormugao": {"lat": 15.4120, "lon": 73.8050, "imbl_dist_nm": 160.0, "border_zone": "Arabian Sea EEZ (Goa Coast)"},
         "panaji": {"lat": 15.4989, "lon": 73.8278, "imbl_dist_nm": 160.0, "border_zone": "Arabian Sea EEZ (Goa Coast)"},
 
@@ -257,10 +269,12 @@ class GisAgent:
     def __init__(self, eez_geojson_path: str = EEZ_FILE):
         self.eez_geojson_path = eez_geojson_path
         self.eez_shape = self.load_bhuvan_eez(eez_geojson_path)
+        self.prepared_eez = prep(self.eez_shape) if (self.eez_shape is not None and prep is not None) else None
 
     def load_bhuvan_eez(self, geojson_path: str) -> Optional[Any]:
         """
-        Loads local india_eez.geojson and constructs a Shapely polygon geometry.
+        Loads local india_eez.geojson (or high-res boundary) and constructs a Shapely polygon geometry.
+        Unions all features if multiple are present.
         """
         if not os.path.exists(geojson_path):
             return None
@@ -273,98 +287,214 @@ class GisAgent:
                 data = json.load(f)
 
             if "features" in data and len(data["features"]) > 0:
-                geom = data["features"][0].get("geometry")
-                if geom:
-                    return shape(geom)
+                geoms = [shape(feat["geometry"]) for feat in data["features"] if feat.get("geometry")]
+                if not geoms:
+                    return None
+                if len(geoms) == 1:
+                    return geoms[0]
+                return unary_union(geoms) if unary_union is not None else geoms[0]
         except Exception as e:
             print(f"[GisAgent Notice] Could not load EEZ GeoJSON: {e}")
 
         return None
 
-    def resolve_location(self, target_location: str) -> Dict[str, Any]:
-        if target_location and "," in str(target_location):
+    GAZETTEER_ALIASES = {
+        # Regional language and common aliases
+        "mumbai": "mumbai", "bombay": "mumbai", "મુંબઈ": "mumbai", "மும்பை": "mumbai", "मुंबई": "mumbai", "മുംബൈ": "mumbai", "ముంబై": "mumbai", "মুম্বই": "mumbai", "বোম্বাই": "mumbai",
+        "chennai": "chennai", "madras": "chennai", "சென்னை": "chennai", "चेन्नई": "chennai", "చెన్నై": "chennai",
+        "kochi": "kochi", "cochin": "kochi", "കൊച്ചി": "kochi", "கொச்சி": "kochi", "कोच्चि": "kochi",
+        "goa": "goa", "mormugao": "goa", "panaji": "goa", "ગોવા": "goa", "கோவா": "goa", "गोवा": "goa", "ഗോവ": "goa", "గోవా": "goa", "গোয়া": "goa",
+        "tuticorin": "tuticorin", "thoothukudi": "thoothukudi", "தூத்துக்குடி": "thoothukudi", "थूथुकुडी": "thoothukudi", "तूतीकोरिन": "thoothukudi", "തൂത്തുക്കുടി": "thoothukudi",
+        "rameswaram": "rameswaram", "ராமேஸ்வரம்": "rameswaram", "रामेश्वरम": "rameswaram",
+        "kanyakumari": "kanyakumari", "cape comorin": "kanyakumari", "கன்னியாகுமரி": "kanyakumari", "कन्याकुमारी": "kanyakumari",
+        "visakhapatnam": "visakhapatnam", "vizag": "visakhapatnam", "విశాఖపట్నం": "visakhapatnam", "विशाखापट्टनम": "visakhapatnam",
+        "porbandar": "porbandar", "પોરબંદર": "porbandar", "पोरबंदर": "porbandar",
+        "veraval": "veraval", "વેરાવળ": "veraval", "वेरावल": "veraval",
+        "okha": "okha", "ઓખા": "okha",
+        "kandla": "kandla", "કંડલા": "kandla", "दीनदयाल": "kandla",
+        "mangalore": "mangalore", "new mangalore": "mangalore", "मंगलोर": "mangalore",
+        "karwar": "karwar", "कारवार": "karwar",
+        "paradip": "paradip", "पारादीप": "paradip",
+        "digha": "digha", "দিঘা": "digha", "दीघा": "digha",
+        "haldia": "haldia", "হলদিয়া": "haldia",
+        "kolkata": "haldia", "calcutta": "haldia", "কলকাতা": "haldia",
+        "sri lanka": "sri lanka", "srilanka": "sri lanka", "ceylon": "sri lanka", "colombo": "sri lanka",
+        "port blair": "port blair", "andaman": "port blair",
+        "kavaratti": "kavaratti", "lakshadweep": "kavaratti",
+    }
+
+    def _evaluate_coordinate_sector(self, lat: float, lon: float, name: Optional[str] = None) -> Dict[str, Any]:
+        """Evaluates domain validity, IMBL border proximity, and EEZ status for coordinates."""
+        # Validate global coordinate boundaries
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return {
+                "name": name or f"{lat:.4f},{lon:.4f}",
+                "lat": lat,
+                "lon": lon,
+                "imbl_dist_nm": 9999.0,
+                "border_zone": "Invalid Coordinates (Out of Global Latitude/Longitude Bounds)",
+                "is_within_eez": False,
+                "out_of_operational_domain": True,
+                "is_valid_coordinates": False,
+                "is_unknown": False,
+            }
+
+        # Validate ORCA Indian Ocean operational domain (-15 <= lat <= 30, 50 <= lon <= 105)
+        if not (-15.0 <= lat <= 30.0 and 50.0 <= lon <= 105.0):
+            return {
+                "name": name or f"{lat:.4f},{lon:.4f}",
+                "lat": lat,
+                "lon": lon,
+                "imbl_dist_nm": 9999.0,
+                "border_zone": "Outside Indian Maritime Domain / International Waters",
+                "is_within_eez": False,
+                "out_of_operational_domain": True,
+                "is_valid_coordinates": True,
+                "is_unknown": False,
+            }
+
+        # Dynamic IMBL / border zone evaluation based on geographic sector
+        if lat >= 22.0 and lon <= 69.5:
+            imbl_dist = max(3.0, (lon - 68.1) * 60.0)
+            border_zone = "India-Pakistan IMBL (Sir Creek Sector)"
+        elif 8.0 <= lat <= 10.8 and 78.5 <= lon <= 80.5:
+            imbl_dist = max(3.0, (79.9 - lon) * 60.0)
+            border_zone = "India-Sri Lanka IMBL (Palk Strait / Gulf of Mannar)"
+        elif lat <= 9.0 and 71.0 <= lon <= 74.5:
+            imbl_dist = max(10.0, (lat - 7.5) * 60.0)
+            border_zone = "India-Maldives IMBL (Eight Degree Channel)"
+        elif lat <= 7.5 and lon >= 93.0:
+            imbl_dist = max(10.0, (lon - 94.5) * 60.0)
+            border_zone = "India-Indonesia Maritime Boundary (Great Nicobar)"
+        else:
+            imbl_dist = 65.0
+            border_zone = "Indian Exclusive Economic Zone"
+
+        resolved_name = name
+        if not resolved_name:
             try:
-                parts = str(target_location).split(",")
-                lat, lon = float(parts[0].strip()), float(parts[1].strip())
+                landmark = find_nearest_coastal_landmark(lat, lon)
+                resolved_name = landmark.get("landmark_name") or f"Lat {lat:.4f}°, Lon {lon:.4f}°"
+            except Exception:
+                resolved_name = f"Lat {lat:.4f}°, Lon {lon:.4f}°"
 
-                # Validate global coordinate boundaries
-                if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-                    return {
-                        "lat": lat,
-                        "lon": lon,
-                        "imbl_dist_nm": 9999.0,
-                        "border_zone": "Invalid Coordinates (Out of Global Latitude/Longitude Bounds)",
-                        "is_within_eez": False,
-                        "out_of_operational_domain": True,
-                        "is_valid_coordinates": False,
-                    }
-
-                # Validate ORCA Indian Ocean operational domain (-15 <= lat <= 30, 50 <= lon <= 105)
-                if not (-15.0 <= lat <= 30.0 and 50.0 <= lon <= 105.0):
-                    return {
-                        "lat": lat,
-                        "lon": lon,
-                        "imbl_dist_nm": 9999.0,
-                        "border_zone": "Outside Indian Maritime Domain / International Waters",
-                        "is_within_eez": False,
-                        "out_of_operational_domain": True,
-                        "is_valid_coordinates": True,
-                    }
-
-                # Dynamic IMBL / border zone evaluation based on geographic sector
-                if lat >= 22.0 and lon <= 69.5:
-                    imbl_dist = max(3.0, (lon - 68.1) * 60.0)
-                    border_zone = "India-Pakistan IMBL (Sir Creek Sector)"
-                elif 8.0 <= lat <= 10.8 and 78.5 <= lon <= 80.5:
-                    imbl_dist = max(3.0, (79.9 - lon) * 60.0)
-                    border_zone = "India-Sri Lanka IMBL (Palk Strait / Gulf of Mannar)"
-                elif lat <= 9.0 and 71.0 <= lon <= 74.5:
-                    imbl_dist = max(10.0, (lat - 7.5) * 60.0)
-                    border_zone = "India-Maldives IMBL (Eight Degree Channel)"
-                elif lat <= 7.5 and lon >= 93.0:
-                    imbl_dist = max(10.0, (lon - 94.5) * 60.0)
-                    border_zone = "India-Indonesia Maritime Boundary (Great Nicobar)"
+        in_eez = True
+        if self.eez_shape is not None and Point is not None:
+            try:
+                pt = Point(lon, lat)
+                if self.prepared_eez is not None:
+                    in_eez = bool(self.prepared_eez.contains(pt) or self.eez_shape.intersects(pt))
                 else:
-                    imbl_dist = 65.0
-                    border_zone = "Indian Exclusive Economic Zone"
+                    in_eez = bool(self.eez_shape.contains(pt) or self.eez_shape.intersects(pt))
+            except Exception:
+                in_eez = True
 
-                return {
-                    "lat": lat,
-                    "lon": lon,
-                    "imbl_dist_nm": round(imbl_dist, 1),
-                    "border_zone": border_zone,
-                    "is_within_eez": True,
-                    "out_of_operational_domain": False,
-                    "is_valid_coordinates": True,
-                }
+        return {
+            "name": resolved_name,
+            "lat": lat,
+            "lon": lon,
+            "imbl_dist_nm": round(imbl_dist, 1),
+            "border_zone": border_zone,
+            "is_within_eez": in_eez,
+            "out_of_operational_domain": False,
+            "is_valid_coordinates": True,
+            "is_unknown": False,
+        }
+
+    def resolve_location(self, target_location: Any) -> Dict[str, Any]:
+        if target_location is None:
+            return {
+                "name": "Location Required",
+                "lat": None,
+                "lon": None,
+                "imbl_dist_nm": 0.0,
+                "border_zone": "None Specified",
+                "is_within_eez": False,
+                "out_of_operational_domain": False,
+                "is_valid_coordinates": False,
+                "is_unknown": True,
+            }
+
+        # Check if LocationContext object or dict with latitude/longitude
+        lat_val = getattr(target_location, "latitude", None)
+        lon_val = getattr(target_location, "longitude", None)
+        name_val = getattr(target_location, "location_name", None)
+
+        if isinstance(target_location, dict):
+            lat_val = target_location.get("latitude", target_location.get("lat", lat_val))
+            lon_val = target_location.get("longitude", target_location.get("lon", lon_val))
+            name_val = target_location.get("location_name", target_location.get("name", name_val))
+
+        if lat_val is not None and lon_val is not None:
+            try:
+                lat = float(lat_val)
+                lon = float(lon_val)
+                return self._evaluate_coordinate_sector(lat, lon, name=name_val)
+            except (ValueError, TypeError):
+                pass
+
+        if isinstance(target_location, (tuple, list)) and len(target_location) >= 2:
+            try:
+                lat = float(target_location[0])
+                lon = float(target_location[1])
+                return self._evaluate_coordinate_sector(lat, lon)
+            except (ValueError, TypeError):
+                pass
+
+        loc_str = str(name_val or target_location).strip()
+        if "," in loc_str:
+            try:
+                parts = loc_str.split(",")
+                lat = float(parts[0].strip())
+                lon = float(parts[1].strip())
+                return self._evaluate_coordinate_sector(lat, lon)
             except (ValueError, IndexError):
                 pass
 
-        key = (target_location or "").strip().lower()
+        clean_key = loc_str.lower().strip()
 
-        # 1. Country-to-port alias mapping (e.g. srilanka / sri lanka -> Colombo Port)
+        # 1. Gazetteer aliases
+        for alias, mapped_sec in self.GAZETTEER_ALIASES.items():
+            if alias == clean_key or f" {alias} " in f" {clean_key} " or clean_key.startswith(f"{alias} ") or clean_key.endswith(f" {alias}"):
+                if mapped_sec in self.COUNTRY_PORT_ALIASES:
+                    res = dict(self.COUNTRY_PORT_ALIASES[mapped_sec])
+                    res["is_unknown"] = False
+                    res["is_valid_coordinates"] = True
+                    return res
+                if mapped_sec in self.COASTAL_SECTORS:
+                    res = dict(self.COASTAL_SECTORS[mapped_sec])
+                    res["name"] = mapped_sec.title()
+                    res["is_unknown"] = False
+                    res["is_valid_coordinates"] = True
+                    return res
+
+        # 2. Country-to-port alias mapping
         for alias, sector in self.COUNTRY_PORT_ALIASES.items():
-            if alias in key:
+            if alias in clean_key:
                 res = dict(sector)
                 res["is_unknown"] = False
+                res["is_valid_coordinates"] = True
                 return res
 
-        # 2. Known coastal sectors
+        # 3. Known coastal sectors
         for name, sector in self.COASTAL_SECTORS.items():
-            if name in key:
+            if name in clean_key:
                 res = dict(sector)
                 res["name"] = name.title()
                 res["is_unknown"] = False
+                res["is_valid_coordinates"] = True
                 return res
 
-        # 3. Default fallback for unknown locations:
-        # Return a safe maritime offshore location (in Gulf of Mannar waters), NOT an inland land point!
+        # 4. Unknown / Unresolvable location (ZERO SILENT TUTICORIN FALLBACK)
         return {
-            "name": target_location or "Unknown Offshore Sector",
-            "lat": 8.7642,
-            "lon": 78.2500,
-            "imbl_dist_nm": 32.5,
-            "border_zone": "Indian Exclusive Economic Zone",
+            "name": loc_str,
+            "lat": None,
+            "lon": None,
+            "imbl_dist_nm": 0.0,
+            "border_zone": "Unknown Geographic Location",
+            "is_within_eez": False,
+            "out_of_operational_domain": False,
+            "is_valid_coordinates": False,
             "is_unknown": True,
         }
 
@@ -425,17 +555,40 @@ class GisAgent:
             return True
         return False
 
-    def check_imbl_proximity(self, target_location: str) -> Dict[str, Any]:
+    def check_imbl_proximity(self, target_location: Any) -> Dict[str, Any]:
         sector = self.resolve_location(target_location)
-        dist_nm = sector["imbl_dist_nm"]
-        border_zone = sector["border_zone"]
-        lat = sector["lat"]
-        lon = sector["lon"]
+        dist_nm = sector.get("imbl_dist_nm", 0.0)
+        border_zone = sector.get("border_zone", "Unknown")
+        lat = sector.get("lat")
+        lon = sector.get("lon")
+
+        # Location Unresolvable / Missing check
+        if sector.get("is_unknown") or lat is None or lon is None:
+            return {
+                "target_location": str(target_location) if target_location is not None else "Location Required",
+                "coordinates": {"lat": None, "lon": None},
+                "distance_to_imbl_nm": 0.0,
+                "distance_to_imbl_km": 0.0,
+                "border_zone": "Unknown Geographic Location",
+                "is_within_eez": False,
+                "status_flag": "LOCATION_REQUIRED",
+                "compliance_status": "LOCATION_REQUIRED",
+                "advisory": f"Geographic location '{target_location}' could not be resolved. Border monitoring and EEZ verification require a recognized coastal port or valid GPS coordinates.",
+                "shipping_lane": {
+                    "inside_lane": False,
+                    "nearest_lane_name": "Unknown",
+                    "corridor_clearance_nm": 0.0,
+                    "status_flag": "LOCATION_REQUIRED",
+                    "advisory": "Location unresolvable.",
+                },
+                "shapely_verified": False,
+                "is_unknown": True,
+            }
 
         # Out-of-Operational-Domain check
         if sector.get("out_of_operational_domain") or not (-15.0 <= lat <= 30.0 and 50.0 <= lon <= 105.0):
             return {
-                "target_location": target_location,
+                "target_location": str(target_location),
                 "coordinates": {"lat": lat, "lon": lon},
                 "distance_to_imbl_nm": dist_nm,
                 "distance_to_imbl_km": round(dist_nm * 1.852, 2) if dist_nm < 9000 else 9999.0,
@@ -452,6 +605,7 @@ class GisAgent:
                     "advisory": "Vessel position is outside the Indian Ocean operational domain.",
                 },
                 "shapely_verified": False,
+                "is_unknown": False,
             }
 
         # Geometric boundary check with Shapely if available
@@ -459,7 +613,10 @@ class GisAgent:
         if self.eez_shape is not None and Point is not None:
             pt = Point(lon, lat)
             try:
-                is_within_eez = bool(self.eez_shape.contains(pt) or self.eez_shape.intersects(pt))
+                if self.prepared_eez is not None:
+                    is_within_eez = bool(self.prepared_eez.contains(pt) or self.eez_shape.intersects(pt))
+                else:
+                    is_within_eez = bool(self.eez_shape.contains(pt) or self.eez_shape.intersects(pt))
             except Exception:
                 is_within_eez = dist_nm <= self.MAX_EEZ_LIMIT_NM
 
@@ -642,6 +799,34 @@ class GisAgent:
 
         return False
 
+    def is_over_land(self, lat: float, lon: float) -> bool:
+        """Checks if a geographic coordinate falls over peninsular Indian or Sri Lankan landmass."""
+        if Point:
+            pt = Point(lon, lat)
+            if PENINSULA_CORE_LANDMASK and PENINSULA_CORE_LANDMASK.contains(pt):
+                return True
+            if SRI_LANKA_LANDMASK and SRI_LANKA_LANDMASK.contains(pt):
+                return True
+        # Additional bathymetric heuristic check if available
+        try:
+            from ml.data_ingestion.bathymetry_geography import get_geographic_features
+            geo = get_geographic_features(lat, lon)
+            if geo.get("is_land"):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def is_in_indian_eez(self, lat: float, lon: float) -> bool:
+        """Determines whether a coordinate is inside the Indian Exclusive Economic Zone."""
+        if self.prepared_eez and Point:
+            try:
+                return bool(self.prepared_eez.contains(Point(lon, lat)))
+            except Exception:
+                pass
+        # Fallback to coarse bounding geofence if prepared geometry is unavailable
+        return bool(0.0 <= lat <= 25.0 and 65.0 <= lon <= 95.0)
+
     def generate_safe_sea_route(
         self,
         origin: Any,
@@ -656,6 +841,46 @@ class GisAgent:
         """
         orig_sector = self.resolve_location(str(origin))
         dest_sector = self.resolve_location(str(destination))
+
+        # 0. Unknown origin/destination guardrail:
+        # Do NOT treat unknown destination as LAND_INTERSECTION_ERROR
+        if dest_sector.get("is_unknown") and not any(k in str(destination).lower() for k in ["pfz", "hotspot", "offshore", "waypoint"]):
+            return {
+                "route_status": "UNKNOWN_DESTINATION",
+                "error": "UNKNOWN_DESTINATION",
+                "total_distance_nm": 0.0,
+                "estimated_duration_hours": 0.0,
+                "estimated_duration_formatted": "N/A",
+                "cruising_speed_knots": cruising_speed_knots,
+                "waypoints_count": 0,
+                "minimum_border_clearance_nm": 0.0,
+                "dogleg_reroute_active": False,
+                "waypoints": [],
+                "route_geojson": {"type": "FeatureCollection", "features": []},
+                "navigational_brief": (
+                    f"Destination '{destination}' could not be resolved to known maritime coordinates or ports. "
+                    f"Please provide a recognized port name (e.g. Tuticorin, Colombo Port, Kochi) or GPS coordinates."
+                ),
+            }
+
+        if orig_sector.get("is_unknown") and not any(k in str(origin).lower() for k in ["pfz", "hotspot", "offshore", "waypoint"]):
+            return {
+                "route_status": "UNKNOWN_ORIGIN",
+                "error": "UNKNOWN_ORIGIN",
+                "total_distance_nm": 0.0,
+                "estimated_duration_hours": 0.0,
+                "estimated_duration_formatted": "N/A",
+                "cruising_speed_knots": cruising_speed_knots,
+                "waypoints_count": 0,
+                "minimum_border_clearance_nm": 0.0,
+                "dogleg_reroute_active": False,
+                "waypoints": [],
+                "route_geojson": {"type": "FeatureCollection", "features": []},
+                "navigational_brief": (
+                    f"Origin '{origin}' could not be resolved to known maritime coordinates or ports. "
+                    f"Please provide a recognized port name (e.g. Tuticorin, Colombo Port, Kochi) or GPS coordinates."
+                ),
+            }
 
         o_lat, o_lon = orig_sector["lat"], orig_sector["lon"]
         d_lat, d_lon = dest_sector["lat"], dest_sector["lon"]
@@ -725,27 +950,6 @@ class GisAgent:
                     }]
                 },
                 "navigational_brief": f"Vessel is already at the target destination ({orig_sector.get('name', 'Current Location')}). No nautical transit required.",
-            }
-
-        # 2. Unknown destination guardrail:
-        # Do NOT treat unknown destination as LAND_INTERSECTION_ERROR
-        if dest_sector.get("is_unknown") and not any(k in str(destination).lower() for k in ["pfz", "hotspot", "offshore", "waypoint"]):
-            return {
-                "route_status": "UNKNOWN_DESTINATION",
-                "error": "UNKNOWN_DESTINATION",
-                "total_distance_nm": 0.0,
-                "estimated_duration_hours": 0.0,
-                "estimated_duration_formatted": "N/A",
-                "cruising_speed_knots": cruising_speed_knots,
-                "waypoints_count": 0,
-                "minimum_border_clearance_nm": 0.0,
-                "dogleg_reroute_active": False,
-                "waypoints": [],
-                "route_geojson": {"type": "FeatureCollection", "features": []},
-                "navigational_brief": (
-                    f"Destination '{destination}' could not be resolved to known maritime coordinates or ports. "
-                    f"Please provide a recognized port name (e.g. Tuticorin, Colombo Port, Kochi) or GPS coordinates."
-                ),
             }
 
         # 3. Coastal Landmask Guardrail: Detect overland marine routing impossibilities
@@ -932,75 +1136,104 @@ class GisAgent:
 
     def execute_task(
         self,
-        location: str,
-        time_frame: str,
-        task_instructions: str,
-        expected_format: str,
-        persona: str,
+        location: Any,
+        time_frame: str = "today",
+        task_instructions: str = "",
+        expected_format: str = "TEXT_SUMMARY",
+        persona: str = "FISHERMAN",
     ) -> Dict[str, Any]:
-        loc_str = location.strip() if location else "Offshore Zone"
+        sector = self.resolve_location(location)
+        loc_name = sector.get("name") if not sector.get("is_unknown") else (str(location) if location else "Location Required")
+        loc_str = str(loc_name)
         time_str = time_frame.strip() if time_frame else "Current"
         format_upper = expected_format.strip().upper() if expected_format else "TEXT_SUMMARY"
         persona_upper = persona.strip().upper() if persona else "UNKNOWN"
 
-        proximity = self.check_imbl_proximity(loc_str)
+        loc_dict = {
+            "name": sector.get("name") or loc_name,
+            "latitude": sector.get("lat"),
+            "longitude": sector.get("lon"),
+        }
 
-        # Check if route planning was requested
         task_lower = (task_instructions or "").lower()
-        is_route_requested = any(k in task_lower for k in ["route", "passage", "navigate", "sail", "waypoint", "plan", "course"])
-        
-        # Check explicit "from X to Y" in task instructions
-        dest_loc = None
-        route_match = re.search(r"from\s+([a-zA-Z\s]+?)\s+to\s+([a-zA-Z\s]+)", task_lower)
-        if route_match:
-            cand_orig = route_match.group(1).strip().lower()
-            cand_dest = route_match.group(2).strip().lower()
+        is_route_requested = any(k in task_lower for k in ["route", "passage", "navigate", "sail", "waypoint", "plan", "course"]) or "from " in task_lower
 
-            # Check country-to-port alias mapping (e.g. srilanka / sri lanka -> Colombo Port)
-            for alias, port_data in self.COUNTRY_PORT_ALIASES.items():
-                if alias in cand_orig:
-                    loc_str = f"{port_data['lat']},{port_data['lon']}"
-                if alias in cand_dest:
-                    dest_loc = f"{port_data['lat']},{port_data['lon']}"
-
-            for k_sec in self.COASTAL_SECTORS:
-                if k_sec in cand_orig and loc_str == cand_orig:
-                    loc_str = k_sec
-                if k_sec in cand_dest and not dest_loc:
-                    dest_loc = k_sec
-            if not dest_loc:
-                dest_loc = cand_dest
-            is_route_requested = True
-
-        # If destination query contains "srilanka" or "sri lanka", default destination to Colombo Port (6.9428° N, 79.8412° E)
-        if not dest_loc:
-            if "srilanka" in task_lower or "sri lanka" in task_lower or "colombo" in task_lower:
-                dest_loc = "6.9428,79.8412"
-                is_route_requested = True
-            elif "to rameswaram" in task_lower or "towards rameswaram" in task_lower or ("rameswaram" in task_lower and "rameswaram" not in loc_str.lower()):
-                dest_loc = "9.2876,79.3129"
-                is_route_requested = True
-            elif "to chennai" in task_lower or "towards chennai" in task_lower or ("chennai" in task_lower and "chennai" not in loc_str.lower()):
-                dest_loc = "13.0827,80.2707"
-                is_route_requested = True
-            elif "to thoothukudi" in task_lower or "towards thoothukudi" in task_lower or "to tuticorin" in task_lower or "towards tuticorin" in task_lower or (("tuticorin" in task_lower or "thoothukudi" in task_lower) and not any(x in loc_str.lower() for x in ["tuticorin", "thoothukudi"])):
-                dest_loc = "8.7642,78.1348"
-                is_route_requested = True
-            elif "to kochi" in task_lower or "towards kochi" in task_lower or ("kochi" in task_lower and "kochi" not in loc_str.lower()):
-                dest_loc = "9.9312,76.2673"
-                is_route_requested = True
-            elif "to kanyakumari" in task_lower or "towards kanyakumari" in task_lower:
-                dest_loc = "8.0883,77.5385"
-                is_route_requested = True
-            else:
-                dest_loc = "9.0383,78.3938"
-            
-        safe_route = self.generate_safe_sea_route(origin=loc_str, destination=dest_loc)
-
-        if safe_route.get("route_status") == "UNKNOWN_DESTINATION":
+        # If location is unknown and not a route request
+        if sector.get("is_unknown") and not is_route_requested:
             return {
                 "agent": "GIS_AGENT",
-                "location": loc_str,
+                "location": loc_dict,
+                "location_name": loc_name,
+                "time_frame": time_str,
+                "format": format_upper,
+                "status": "LOCATION_REQUIRED",
+                "error": "LOCATION_REQUIRED",
+                "distance_to_border_nm": 0.0,
+                "is_within_eez": False,
+                "advisory": f"Geographic location '{location}' is required. Please specify a recognized coastal port or valid GPS coordinates.",
+                "shipping_lane_assessment": {
+                    "inside_lane": False,
+                    "nearest_lane_name": "Unknown",
+                    "corridor_clearance_nm": 0.0,
+                    "status_flag": "LOCATION_REQUIRED",
+                    "advisory": "Location unresolvable.",
+                },
+                "recommendation": "Provide departure harbor or valid GPS coordinates.",
+                "safe_sea_route": None,
+            }
+
+        proximity = self.check_imbl_proximity(location if not sector.get("is_unknown") else loc_name)
+
+        safe_route = None
+        if is_route_requested:
+            dest_loc = None
+            orig_loc = loc_name if not sector.get("is_unknown") else None
+
+            # Check explicit "from X to Y" in task instructions
+            route_match = re.search(r"from\s+([a-zA-Z\s]+?)\s+to\s+([a-zA-Z\s]+)", task_lower)
+            if route_match:
+                orig_loc = route_match.group(1).strip()
+                dest_loc = route_match.group(2).strip()
+            else:
+                to_match = re.search(r"(?:to|towards)\s+([a-zA-Z\s]+)", task_lower)
+                if to_match:
+                    dest_loc = to_match.group(1).strip()
+
+            if not dest_loc:
+                for alias in self.GAZETTEER_ALIASES:
+                    if alias in task_lower and (not orig_loc or alias not in str(orig_loc).lower()):
+                        dest_loc = alias
+                        break
+
+            if dest_loc and orig_loc:
+                safe_route = self.generate_safe_sea_route(origin=orig_loc, destination=dest_loc)
+            elif dest_loc and not orig_loc:
+                return {
+                    "agent": "GIS_AGENT",
+                    "location": loc_dict,
+                    "location_name": loc_name,
+                    "time_frame": time_str,
+                    "format": format_upper,
+                    "status": "LOCATION_REQUIRED",
+                    "error": "DEPARTURE_LOCATION_REQUIRED",
+                    "distance_to_border_nm": 0.0,
+                    "is_within_eez": False,
+                    "advisory": "Departure harbor or origin coordinates required to plan sea passage.",
+                    "shipping_lane_assessment": proximity.get("shipping_lane", {}),
+                    "recommendation": "Specify departure port (e.g. Mumbai, Tuticorin, Kochi).",
+                    "safe_sea_route": None,
+                }
+            else:
+                safe_route = {
+                    "route_status": "UNKNOWN_DESTINATION",
+                    "navigational_brief": "Destination harbor not specified. Route generation aborted.",
+                }
+
+        if safe_route and safe_route.get("route_status") == "UNKNOWN_DESTINATION":
+            return {
+                "agent": "GIS_AGENT",
+                "location": loc_dict,
+                "location_name": loc_name,
                 "time_frame": time_str,
                 "format": format_upper,
                 "status": "DATA_UNAVAILABLE",
@@ -1012,13 +1245,15 @@ class GisAgent:
                 "recommendation": "Destination could not be resolved. Please specify a recognized coastal port or GPS coordinates.",
                 "safe_sea_route": safe_route,
             }
-        if safe_route.get("route_status") in ("OUT_OF_OPERATIONAL_DOMAIN", "ROUTE_EXCEEDS_OPERATIONAL_RANGE") or proximity.get("status_flag") == "OUT_OF_OPERATIONAL_DOMAIN":
-            err_status = safe_route.get("route_status") or proximity.get("status_flag") or "OUT_OF_OPERATIONAL_DOMAIN"
-            brief = safe_route.get("navigational_brief") or proximity.get("advisory") or "Coordinates are outside the ORCA operational Indian Ocean maritime domain."
+
+        if (safe_route and safe_route.get("route_status") in ("OUT_OF_OPERATIONAL_DOMAIN", "ROUTE_EXCEEDS_OPERATIONAL_RANGE")) or proximity.get("status_flag") == "OUT_OF_OPERATIONAL_DOMAIN":
+            err_status = (safe_route.get("route_status") if safe_route else None) or proximity.get("status_flag") or "OUT_OF_OPERATIONAL_DOMAIN"
+            brief = (safe_route.get("navigational_brief") if safe_route else None) or proximity.get("advisory") or "Coordinates are outside the ORCA operational Indian Ocean maritime domain."
             if format_upper == "BINARY_ADVISORY" or (persona_upper == "FISHERMAN" and not is_route_requested):
                 return {
                     "agent": "GIS_AGENT",
-                    "location": loc_str,
+                    "location": loc_dict,
+                    "location_name": loc_name,
                     "time_frame": time_str,
                     "format": "BINARY_ADVISORY",
                     "status": err_status,
@@ -1033,7 +1268,8 @@ class GisAgent:
             elif format_upper == "GEOJSON_POLYGONS" or persona_upper == "AUTHORITY":
                 return {
                     "agent": "GIS_AGENT",
-                    "location": loc_str,
+                    "location": loc_dict,
+                    "location_name": loc_name,
                     "time_frame": time_str,
                     "format": "GEOJSON_POLYGONS",
                     "status": err_status,
@@ -1047,7 +1283,8 @@ class GisAgent:
             else:
                 return {
                     "agent": "GIS_AGENT",
-                    "location": loc_str,
+                    "location": loc_dict,
+                    "location_name": loc_name,
                     "time_frame": time_str,
                     "format": "TEXT_SUMMARY",
                     "status": err_status,
@@ -1058,11 +1295,12 @@ class GisAgent:
                     "safe_sea_route": safe_route,
                 }
 
-        if safe_route.get("route_status") == "LAND_INTERSECTION_ERROR":
+        if safe_route and safe_route.get("route_status") == "LAND_INTERSECTION_ERROR":
             if format_upper == "BINARY_ADVISORY" or (persona_upper == "FISHERMAN" and not is_route_requested):
                 return {
                     "agent": "GIS_AGENT",
-                    "location": loc_str,
+                    "location": loc_dict,
+                    "location_name": loc_name,
                     "time_frame": time_str,
                     "format": "BINARY_ADVISORY",
                     "status": "LAND_INTERSECTION_ERROR",
@@ -1077,7 +1315,8 @@ class GisAgent:
             elif format_upper == "GEOJSON_POLYGONS" or persona_upper == "AUTHORITY":
                 return {
                     "agent": "GIS_AGENT",
-                    "location": loc_str,
+                    "location": loc_dict,
+                    "location_name": loc_name,
                     "time_frame": time_str,
                     "format": "GEOJSON_POLYGONS",
                     "status": "LAND_INTERSECTION_ERROR",
@@ -1091,7 +1330,8 @@ class GisAgent:
             else:
                 return {
                     "agent": "GIS_AGENT",
-                    "location": loc_str,
+                    "location": loc_dict,
+                    "location_name": loc_name,
                     "time_frame": time_str,
                     "format": "TEXT_SUMMARY",
                     "status": "LAND_INTERSECTION_ERROR",
@@ -1106,7 +1346,8 @@ class GisAgent:
             is_safe = proximity["status_flag"] == "SAFE_EEZ_WATERS" and not proximity["shipping_lane"]["inside_lane"]
             return {
                 "agent": "GIS_AGENT",
-                "location": loc_str,
+                "location": loc_dict,
+                "location_name": loc_name,
                 "time_frame": time_str,
                 "format": "BINARY_ADVISORY",
                 "status": "SAFE" if is_safe else "WARNING",
@@ -1121,38 +1362,37 @@ class GisAgent:
         if format_upper == "GEOJSON_POLYGONS" or persona_upper == "AUTHORITY":
             lat = proximity["coordinates"]["lat"]
             lon = proximity["coordinates"]["lon"]
-            bbox = [
-                [round(lon - 0.1, 4), round(lat - 0.1, 4)],
-                [round(lon + 0.1, 4), round(lat - 0.1, 4)],
-                [round(lon + 0.1, 4), round(lat + 0.1, 4)],
-                [round(lon - 0.1, 4), round(lat + 0.1, 4)],
-                [round(lon - 0.1, 4), round(lat - 0.1, 4)],
-            ]
-            geojson = {
-                "type": "FeatureCollection",
-                "features": [
-                    {
-                        "type": "Feature",
-                        "geometry": {"type": "Polygon", "coordinates": [bbox]},
-                        "properties": {
-                            "location": loc_str,
-                            "status_flag": proximity["status_flag"],
-                            "distance_to_imbl_nm": proximity["distance_to_imbl_nm"],
-                            "border_zone": proximity["border_zone"],
-                            "is_within_eez": proximity["is_within_eez"],
-                            "shapely_verified": proximity["shapely_verified"],
-                            "shipping_lane": proximity["shipping_lane"]["nearest_lane_name"],
-                            "inside_shipping_lane": proximity["shipping_lane"]["inside_lane"],
-                        },
-                    }
-                ],
-            }
-            if is_route_requested:
+            geojson_features = []
+            if lat is not None and lon is not None:
+                bbox = [
+                    [round(lon - 0.1, 4), round(lat - 0.1, 4)],
+                    [round(lon + 0.1, 4), round(lat - 0.1, 4)],
+                    [round(lon + 0.1, 4), round(lat + 0.1, 4)],
+                    [round(lon - 0.1, 4), round(lat + 0.1, 4)],
+                    [round(lon - 0.1, 4), round(lat - 0.1, 4)],
+                ]
+                geojson_features.append({
+                    "type": "Feature",
+                    "geometry": {"type": "Polygon", "coordinates": [bbox]},
+                    "properties": {
+                        "location": loc_name,
+                        "status_flag": proximity["status_flag"],
+                        "distance_to_imbl_nm": proximity["distance_to_imbl_nm"],
+                        "border_zone": proximity["border_zone"],
+                        "is_within_eez": proximity["is_within_eez"],
+                        "shapely_verified": proximity["shapely_verified"],
+                        "shipping_lane": proximity["shipping_lane"]["nearest_lane_name"],
+                        "inside_shipping_lane": proximity["shipping_lane"]["inside_lane"],
+                    },
+                })
+            geojson = {"type": "FeatureCollection", "features": geojson_features}
+            if is_route_requested and safe_route and "route_geojson" in safe_route:
                 geojson = safe_route["route_geojson"]
 
             return {
                 "agent": "GIS_AGENT",
-                "location": loc_str,
+                "location": loc_dict,
+                "location_name": loc_name,
                 "time_frame": time_str,
                 "format": "GEOJSON_POLYGONS",
                 "geojson": geojson,
@@ -1162,19 +1402,20 @@ class GisAgent:
             }
 
         summary_text = (
-            f"GIS Geofencing for {loc_str}: Status is {proximity['status_flag']}. "
+            f"GIS Geofencing for {loc_name}: Status is {proximity['status_flag']}. "
             f"Distance to nearest IMBL ({proximity['border_zone']}) is {proximity['distance_to_imbl_nm']} NM "
             f"({proximity['distance_to_imbl_km']} km). Within 200 NM EEZ: {proximity['is_within_eez']} "
             f"(Shapely Verified: {proximity['shapely_verified']})."
         )
         if proximity["shipping_lane"]["status_flag"] != "CLEAR_OF_SHIPPING_LANES":
             summary_text += f"\n• {proximity['shipping_lane']['advisory']}"
-        if is_route_requested:
+        if is_route_requested and safe_route and "navigational_brief" in safe_route:
             summary_text += f"\n• {safe_route['navigational_brief']}"
 
         return {
             "agent": "GIS_AGENT",
-            "location": loc_str,
+            "location": loc_dict,
+            "location_name": loc_name,
             "time_frame": time_str,
             "format": "TEXT_SUMMARY",
             "summary": summary_text,
@@ -1187,8 +1428,8 @@ class GisAgent:
         self,
         query_text: Optional[str] = None,
         raw_agent_outputs: Optional[Dict[str, Any]] = None,
-        vessel_lat: float = 8.7642,
-        vessel_lon: float = 78.1348,
+        vessel_lat: Optional[float] = None,
+        vessel_lon: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         return resolve_ocean_target(
             query_text=query_text,
@@ -1220,6 +1461,8 @@ LANDMARK_DISPLAY_NAMES: Dict[str, str] = {
     "jakhau": "Jakhau Fishery Harbor",
     "kandla": "Kandla Deendayal Port",
     "ratnagiri": "Ratnagiri Mirya Bay",
+    "goa": "Mormugao Port (Goa)",
+    "panaji": "Panaji Port (Goa)",
     "mormugao": "Mormugao Port (Goa)",
     "neendakara": "Neendakara Port (Kollam)",
     "vizhinjam": "Vizhinjam International Seaport",
@@ -1302,8 +1545,8 @@ def find_nearest_coastal_landmark(lat: float, lon: float) -> Dict[str, Any]:
 def resolve_ocean_target(
     query_text: Optional[str] = None,
     raw_agent_outputs: Optional[Dict[str, Any]] = None,
-    vessel_lat: float = 8.7642,
-    vessel_lon: float = 78.1348,
+    vessel_lat: Optional[float] = None,
+    vessel_lon: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Deterministic coordinate resolver that inspects query intent and active telemetry
@@ -1325,11 +1568,43 @@ def resolve_ocean_target(
     except Exception:
         pass
 
+    v_lat = vessel_lat
+    v_lon = vessel_lon
+
+    # Extract coordinates from raw_agent_outputs if not directly provided
+    if v_lat is None or v_lon is None:
+        loc_cand = outputs.get("location_context") or outputs.get("location") or outputs.get("primary_location")
+        if isinstance(loc_cand, dict):
+            v_lat = loc_cand.get("latitude", loc_cand.get("lat"))
+            v_lon = loc_cand.get("longitude", loc_cand.get("lon"))
+        elif loc_cand and hasattr(loc_cand, "latitude") and hasattr(loc_cand, "longitude"):
+            v_lat = loc_cand.latitude
+            v_lon = loc_cand.longitude
+        elif loc_cand and isinstance(loc_cand, str) and "," in loc_cand:
+            try:
+                parts = loc_cand.split(",")
+                v_lat, v_lon = float(parts[0].strip()), float(parts[1].strip())
+            except Exception:
+                pass
+
+    if v_lat is None or v_lon is None:
+        for ag_key in ["WEATHER_AGENT", "OCEAN_AGENT", "GIS_AGENT", "PFZ_AGENT", "DISASTER_AGENT"]:
+            ag_data = outputs.get(ag_key)
+            if isinstance(ag_data, dict):
+                loc_obj = ag_data.get("location")
+                if isinstance(loc_obj, dict) and loc_obj.get("latitude") is not None and loc_obj.get("longitude") is not None:
+                    v_lat = loc_obj.get("latitude")
+                    v_lon = loc_obj.get("longitude")
+                    break
+
+    if v_lat is None or v_lon is None:
+        return None
+
     try:
-        v_lat = float(vessel_lat)
-        v_lon = float(vessel_lon)
+        v_lat = float(v_lat)
+        v_lon = float(v_lon)
     except (ValueError, TypeError):
-        v_lat, v_lon = 8.7642, 78.1348
+        return None
 
     # Fast-check vessel coordinates within Indian Ocean operational domain (-15 <= lat <= 30, 50 <= lon <= 105)
     if not (-15.0 <= v_lat <= 30.0 and 50.0 <= v_lon <= 105.0):
@@ -1377,9 +1652,10 @@ def resolve_ocean_target(
             details["shelter_name"] = shelter_data.get("shelter_name", "Designated Emergency Breakwater Shelter")
             details["shelter_type"] = "Emergency Breakwater Basin"
         else:
-            target_lat = 8.7610
-            target_lon = 78.1420
-            details["shelter_name"] = "V.O. Chidambaranar Port Breakwater Basin"
+            target_lat = v_lat
+            target_lon = v_lon
+            lmark = find_nearest_coastal_landmark(v_lat, v_lon)
+            details["shelter_name"] = f"Emergency Coastal Anchorage off {lmark['landmark_name']}"
             details["shelter_type"] = "Emergency Breakwater Basin"
 
     # Priority 2: Cyclone / Severe Storm Eye
@@ -1431,17 +1707,17 @@ def resolve_ocean_target(
         if features:
             best_feat = max(features, key=lambda f: f.get("properties", {}).get("suitability_score", 0))
             props = best_feat.get("properties", {})
-            target_lat = float(props.get("centroid_lat", 9.0932))
-            target_lon = float(props.get("centroid_lon", 78.3218))
+            target_lat = float(props.get("centroid_lat", v_lat))
+            target_lon = float(props.get("centroid_lon", v_lon))
             details["suitability_score"] = props.get("suitability_score", 94)
             details["likely_catch"] = props.get("likely_catch", ["Yellowfin Tuna", "Mackerel"])
             details["chlorophyll_front"] = props.get("chlorophyll_mg_m3", 0.58)
         else:
-            target_lat = 9.0932
-            target_lon = 78.3218
-            details["suitability_score"] = 92
-            details["likely_catch"] = ["Yellowfin Tuna", "Mackerel"]
-            details["chlorophyll_front"] = 0.58
+            target_lat = v_lat
+            target_lon = v_lon
+            details["suitability_score"] = 50
+            details["likely_catch"] = ["Pelagic Marine Species"]
+            details["chlorophyll_front"] = 0.35
 
     # Priority 4: Navigational Route / Fairway
     else:
@@ -1450,20 +1726,27 @@ def resolve_ocean_target(
         safe_route = outputs.get("GIS_AGENT", {}).get("safe_sea_route") or outputs.get("safe_sea_route")
         if isinstance(safe_route, dict) and safe_route.get("waypoints"):
             wp_last = safe_route["waypoints"][-1]
-            target_lat = float(wp_last.get("lat") or wp_last.get("latitude", 8.9142))
-            target_lon = float(wp_last.get("lon") or wp_last.get("longitude", 78.3348))
+            target_lat = float(wp_last.get("lat") or wp_last.get("latitude", v_lat))
+            target_lon = float(wp_last.get("lon") or wp_last.get("longitude", v_lon))
             details["destination_name"] = wp_last.get("name", "Target Fairway Waypoint")
         else:
             dest_cand = outputs.get("destination") or outputs.get("target_location")
             if dest_cand:
                 sec = gis.resolve_location(str(dest_cand))
-                target_lat = float(sec["lat"])
-                target_lon = float(sec["lon"])
-                details["destination_name"] = sec.get("border_zone", "Operational Harbor")
+                if sec.get("lat") is not None and sec.get("lon") is not None:
+                    target_lat = float(sec["lat"])
+                    target_lon = float(sec["lon"])
+                    details["destination_name"] = sec.get("name", "Operational Harbor")
+                else:
+                    target_lat = v_lat
+                    target_lon = v_lon
+                    lmark = find_nearest_coastal_landmark(v_lat, v_lon)
+                    details["destination_name"] = f"Coastal Fairway off {lmark['landmark_name']}"
             else:
-                target_lat = 8.9142
-                target_lon = 78.3348
-                details["destination_name"] = "Thoothukudi Offshore Fairway"
+                target_lat = v_lat
+                target_lon = v_lon
+                lmark = find_nearest_coastal_landmark(v_lat, v_lon)
+                details["destination_name"] = f"Operational Fairway off {lmark['landmark_name']}"
 
     # Compute Bearing, Distance, Cardinal Direction & Landmark Reference
     dist_nm, bearing_str, bearing_deg = gis.calculate_bearing_and_distance(v_lat, v_lon, target_lat, target_lon)

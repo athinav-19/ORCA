@@ -81,11 +81,15 @@ SCRIPT_RANGES = [
 # Maritime domain fallback lexicon
 COASTAL_TERMS = {
     "தூத்துக்குடி": "Thoothukudi", "ராமேஸ்வரம்": "Rameswaram", "சென்னை": "Chennai", "கொச்சி": "Kochi",
+    "மும்பை": "Mumbai", "கோவா": "Goa",
     "மீன்பிடி": "fishing", "மீன்": "fish", "வானிலை": "weather", "அலை": "wave", "புயல்": "cyclone",
     "थूथुकुडी": "Thoothukudi", "तूतीकोरिन": "Thoothukudi", "रामेश्वरम": "Rameswaram",
+    "मुंबई": "Mumbai", "गोवा": "Goa", "चेन्नई": "Chennai", "कोच्चि": "Kochi",
     "मछली": "fish", "मौसम": "weather", "लहरें": "waves", "तूफान": "cyclone", "चक्रवात": "cyclone",
+    "મુંબઈ": "Mumbai", "ગોવા": "Goa",
     "પોરબંદર": "Porbandar", "વેરાવળ": "Veraval", "ઓખા": "Okha", "કંડલા": "Kandla",
     "માછીમારી": "fishing", "માછલી": "fish", "હવામાન": "weather", "મોજા": "waves", "વાવાઝોડું": "cyclone",
+    "മുംബൈ": "Mumbai", "ഗോവ": "Goa",
     "തൂത്തുക്കുടി": "Thoothukudi", "കൊച്ചി": "Kochi", "വിഴിഞ്ഞം": "Vizhinjam",
     "മത്സ്യം": "fish", "മീൻ": "fish", "കാലാവസ്ഥ": "weather", "തിരമാല": "waves", "ചുഴലിക്കാറ്റ്": "cyclone"
 }

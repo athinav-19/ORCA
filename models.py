@@ -184,12 +184,93 @@ def classify_persona_intent(query_text: str) -> Optional[StakeholderPersona]:
 
 
 # =====================================================================
+# Location Context Schemas (Genuine Location-Aware Architecture)
+# =====================================================================
+
+class LocationSource(str, Enum):
+    USER_QUERY = "USER_QUERY"
+    EXPLICIT_QUERY = "EXPLICIT_QUERY"
+    USER_GPS = "USER_GPS"
+    DEVICE_GPS = "DEVICE_GPS"
+    ROUTE = "ROUTE"
+    ROUTE_ORIGIN = "ROUTE_ORIGIN"
+    ROUTE_DESTINATION = "ROUTE_DESTINATION"
+    DEFAULT = "DEFAULT"
+    SYSTEM = "SYSTEM"
+    NONE = "NONE"
+
+
+class LocationStatus(str, Enum):
+    RESOLVED = "RESOLVED"
+    LOCATION_REQUIRED = "LOCATION_REQUIRED"
+    LOCATION_RESOLUTION_FAILED = "LOCATION_RESOLUTION_FAILED"
+    LOCATION_DATA_MISMATCH = "LOCATION_DATA_MISMATCH"
+
+
+class LocationContext(BaseModel):
+    location_type: str = Field("COASTAL_PORT", description="COASTAL_PORT | COORDINATES | ROUTE | MARITIME_SECTOR | RELATIVE_GPS | UNKNOWN")
+    name: Optional[str] = Field(None, description="Standardized geographic feature or port name (e.g. Mumbai, Chennai)")
+    location_name: Optional[str] = Field(None, description="Standardized geographic feature or port name (e.g. Mumbai, Chennai)")
+    latitude: Optional[float] = Field(None, ge=-90.0, le=90.0, description="Resolved decimal latitude")
+    longitude: Optional[float] = Field(None, ge=-180.0, le=180.0, description="Resolved decimal longitude")
+    source: LocationSource = Field(LocationSource.NONE, description="Resolution source: USER_QUERY | USER_GPS | ROUTE_ORIGIN | ROUTE_DESTINATION | SYSTEM | NONE")
+    confidence: float = Field(0.0, ge=0.0, le=1.0, description="Geocoding confidence score")
+    origin: Optional[Dict[str, Any]] = Field(None, description="Origin for route queries {name, latitude, longitude}")
+    destination: Optional[Dict[str, Any]] = Field(None, description="Destination for route queries {name, latitude, longitude}")
+    radius_km: Optional[float] = Field(None, description="Spatial search radius in km")
+    country: Optional[str] = Field("India", description="Country name")
+    region: Optional[str] = Field(None, description="Maritime sector or coastal state (e.g. Maharashtra Coast)")
+    explicit_in_query: bool = Field(False, description="True if explicitly specified in user query text")
+    status: LocationStatus = Field(LocationStatus.RESOLVED, description="Resolution status: RESOLVED | LOCATION_REQUIRED | LOCATION_RESOLUTION_FAILED")
+    error_message: Optional[str] = Field(None, description="Explanation when location resolution fails or is required")
+
+    model_config = {"extra": "allow"}
+
+    def __init__(self, **data: Any):
+        if "name" in data and not data.get("location_name"):
+            data["location_name"] = data["name"]
+        elif "location_name" in data and not data.get("name"):
+            data["name"] = data["location_name"]
+        super().__init__(**data)
+        if self.name and not self.location_name:
+            self.location_name = self.name
+        elif self.location_name and not self.name:
+            self.name = self.location_name
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
+
+    def to_dict(self) -> Dict[str, Any]:
+        resolved_name = self.name or self.location_name
+        return {
+            "location_type": self.location_type,
+            "location_name": resolved_name,
+            "name": resolved_name,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "source": self.source.value if isinstance(self.source, LocationSource) else str(self.source),
+            "confidence": self.confidence,
+            "origin": self.origin,
+            "destination": self.destination,
+            "radius_km": self.radius_km,
+            "country": self.country,
+            "region": self.region,
+            "explicit_in_query": self.explicit_in_query,
+            "status": self.status.value if isinstance(self.status, LocationStatus) else str(self.status),
+            "error_message": self.error_message,
+        }
+
+
+# =====================================================================
 # Pydantic Schemas for Request & Telemetry
 # =====================================================================
 
 class TelemetryData(BaseModel):
-    latitude: float = 8.7642
-    longitude: float = 78.1348
+    latitude: Optional[float] = Field(None, ge=-90.0, le=90.0, description="Vessel GPS latitude (None if no device GPS fix)")
+    longitude: Optional[float] = Field(None, ge=-180.0, le=180.0, description="Vessel GPS longitude (None if no device GPS fix)")
     speed_knots: Optional[float] = 0.0
     heading_degrees: Optional[float] = 120.0
     gps_accuracy_meters: Optional[float] = 4.5
@@ -209,10 +290,6 @@ class QueryRequest(BaseModel):
     source_language_code: Optional[str] = Field(None, description="ISO 639-1 language code (e.g. en, ta, hi, te, ml, bn)")
     language_preference: Optional[str] = Field(None, description="Preferred language code alias (e.g. en, ta, hi, te, ml, bn)")
     lang: Optional[str] = Field(None, description="Client requested ISO 639-1 language code (e.g. en, ta, hi, te, ml, gu, kn, or)")
-    lat: Optional[float] = Field(None, description="Optional latitude")
-    lon: Optional[float] = Field(None, description="Optional longitude")
-    latitude: Optional[float] = Field(None, description="Optional latitude alias")
-    longitude: Optional[float] = Field(None, description="Optional longitude alias")
 
 
 class AdvisoryResponse(BaseModel):
@@ -220,11 +297,11 @@ class AdvisoryResponse(BaseModel):
     wave_height: Optional[str] = Field("1.2m - 1.4m", description="Wave height")
     wind_speed: Optional[str] = Field("14 km/h SW", description="Wind speed")
     key_advisories: Optional[List[str]] = Field(default_factory=lambda: [
-        "🎯 Target: PFZ Hotspot (22.6 NM along Bearing 029° NNE)",
+        "🎯 Target: PFZ Hotspot",
         "🐟 High-Yield Catch: Tuna, Mackerel",
         "🧭 Nav Brief: ~2h 49m at 8.0 kt",
-        "🛡️ Safety: Risk 16.8/100 (Clear of IMBL & Shipping Fairways)",
-        "☀️ INSAT-3DR Solar: Auxiliary endurance +3.9h (+21.4 NM)"
+        "🛡️ Safety: Clear of IMBL & Shipping Fairways",
+        "☀️ INSAT-3DR Solar: Auxiliary endurance verified"
     ])
     chat_text: str = Field("", description="Main conversational text advisory for display and speech")
     threat_status: Optional[str] = Field("SAFE", description="Evaluated threat status: SAFE, CAUTION, NO-GO")
@@ -254,6 +331,9 @@ class OrcaResponse(BaseModel):
     green_marine_energy: Optional[Dict[str, Any]] = Field(None, description="Solar irradiance and zero-emission stats")
     prompt_suggestions: Optional[List[str]] = Field(None, description="Suggested prompt follow-ups")
     satellite_provenance: Optional[Dict[str, Any]] = Field(None, description="Dual-agency satellite telemetry provenance")
+    location_context: Optional[Dict[str, Any]] = Field(None, description="Resolved shared location context")
+    origin: Optional[Dict[str, Any]] = Field(None, description="Resolved route departure origin")
+    destination: Optional[Dict[str, Any]] = Field(None, description="Resolved route arrival destination")
 
     model_config = {"extra": "allow"}
 

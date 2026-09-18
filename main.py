@@ -18,7 +18,7 @@ import time
 import datetime
 import random
 import warnings
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Tuple
 from dotenv import load_dotenv
 from translation_service import IndicTranslationService, detect_language_from_text, SUPPORTED_LANGUAGES
 from models import (
@@ -27,7 +27,12 @@ from models import (
     PERSONA_BADGES,
     resolve_persona,
     classify_persona_intent,
+    LocationSource,
+    LocationStatus,
+    LocationContext,
+    OrcaResponse,
 )
+from gis_agent import GisAgent
 
 # Suppress SDK deprecation warnings for clean console output
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -208,6 +213,241 @@ def normalize_intent_category(intent_str: str, query_str: str = "") -> str:
     return "WEATHER"
 
 
+def extract_locations_from_query(query_text: str) -> Dict[str, Any]:
+    """
+    Extracts explicit location, route origin, and destination from query text.
+    Returns:
+    {
+        "has_route": bool,
+        "origin": Optional[str],
+        "destination": Optional[str],
+        "explicit_location": Optional[str],
+        "is_self_location": bool
+    }
+    """
+    if not query_text:
+        return {"has_route": False, "origin": None, "destination": None, "explicit_location": None, "is_self_location": False}
+
+    q_lower = query_text.lower()
+
+    # Self-location expressions
+    self_loc_patterns = [
+        r"\bnear\s+me\b", r"\baround\s+me\b", r"\bhere\b", r"\bmy\s+location\b",
+        r"\bcurrent\s+location\b", r"\bcurrent\s+position\b", r"\bmy\s+coordinates\b"
+    ]
+    is_self_loc = any(re.search(p, q_lower) for p in self_loc_patterns)
+
+    # Route pattern 1: "from X to Y"
+    m_route = re.search(r"\bfrom\s+([a-zA-Z\s\u0900-\u0D7F]+?)\s+to\s+([a-zA-Z\s\u0900-\u0D7F]+)", query_text, re.IGNORECASE)
+    if m_route:
+        raw_orig = m_route.group(1).strip()
+        raw_dest = m_route.group(2).strip()
+        raw_dest = re.sub(r"\b(and|with|is|safe|weather|tomorrow|today|please|now)\b.*$", "", raw_dest, flags=re.IGNORECASE).strip()
+        raw_dest = re.sub(r"[?!.,;:]+$", "", raw_dest).strip()
+        return {
+            "has_route": True,
+            "origin": raw_orig,
+            "destination": raw_dest,
+            "explicit_location": raw_orig,
+            "is_self_location": is_self_loc,
+        }
+
+    # Route pattern 2: "between X and Y"
+    m_between = re.search(r"\bbetween\s+([a-zA-Z\s\u0900-\u0D7F]+?)\s+and\s+([a-zA-Z\s\u0900-\u0D7F]+)", query_text, re.IGNORECASE)
+    if m_between:
+        raw_orig = m_between.group(1).strip()
+        raw_dest = m_between.group(2).strip()
+        raw_dest = re.sub(r"\b(is|safe|weather|tomorrow|today|please|now)\b.*$", "", raw_dest, flags=re.IGNORECASE).strip()
+        raw_dest = re.sub(r"[?!.,;:]+$", "", raw_dest).strip()
+        return {
+            "has_route": True,
+            "origin": raw_orig,
+            "destination": raw_dest,
+            "explicit_location": raw_orig,
+            "is_self_location": is_self_loc,
+        }
+
+    # Route pattern 3: "navigate/sail/route to Y"
+    m_to = re.search(r"\b(?:navigate|sail|route|passage|heading|bound)\s+to\s+([a-zA-Z\s\u0900-\u0D7F]+)", query_text, re.IGNORECASE)
+    if m_to:
+        raw_dest = m_to.group(1).strip()
+        raw_dest = re.sub(r"\b(and|with|is|safe|weather|tomorrow|today|please|now)\b.*$", "", raw_dest, flags=re.IGNORECASE).strip()
+        raw_dest = re.sub(r"[?!.,;:]+$", "", raw_dest).strip()
+        return {
+            "has_route": True,
+            "origin": None,
+            "destination": raw_dest,
+            "explicit_location": raw_dest,
+            "is_self_location": is_self_loc,
+        }
+
+    # Search for known ports / sectors in query text
+    gis = GisAgent()
+    known_keys = set(gis.COASTAL_SECTORS.keys()) | set(gis.GAZETTEER_ALIASES.keys())
+    sorted_keys = sorted(known_keys, key=len, reverse=True)
+
+    found_locs = []
+    for k in sorted_keys:
+        if re.search(r"[\u0900-\u0D7F]", k):
+            if k in q_lower:
+                found_locs.append(k)
+        else:
+            if re.search(rf"\b{re.escape(k)}\b", q_lower):
+                found_locs.append(k)
+
+    if found_locs:
+        first_loc = found_locs[0]
+        canon = gis.resolve_location(first_loc).get("name", first_loc.title())
+        return {
+            "has_route": False,
+            "origin": None,
+            "destination": None,
+            "explicit_location": canon,
+            "is_self_location": is_self_loc,
+        }
+
+    return {
+        "has_route": False,
+        "origin": None,
+        "destination": None,
+        "explicit_location": None,
+        "is_self_location": is_self_loc,
+    }
+
+
+def resolve_location_context(
+    query_text: str,
+    device_telemetry: Optional[Dict[str, Any]] = None,
+    gis_agent: Optional[Any] = None,
+) -> Tuple[LocationContext, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Enforces the strict location resolution contract:
+    PRIORITY 1: Explicit user location in query (Mumbai, Chennai, Kochi, etc.)
+    PRIORITY 2: Route origin and destination
+    PRIORITY 3: Device GPS (only when 'near me' or location omitted)
+    PRIORITY 4: None -> LOCATION_REQUIRED
+    
+    Returns: (location_context, origin_dict, destination_dict)
+    """
+    if gis_agent is None:
+        gis_agent = GisAgent()
+
+    loc_info = extract_locations_from_query(query_text)
+    explicit_loc = loc_info.get("explicit_location")
+    has_route = loc_info.get("has_route", False)
+    raw_origin = loc_info.get("origin")
+    raw_dest = loc_info.get("destination")
+    is_self_loc = loc_info.get("is_self_location", False)
+
+    # Check device GPS coordinates
+    dev_lat = None
+    dev_lon = None
+    if isinstance(device_telemetry, dict):
+        raw_lat = device_telemetry.get("latitude")
+        raw_lon = device_telemetry.get("longitude")
+        if raw_lat is not None and raw_lon is not None:
+            try:
+                dev_lat = float(raw_lat)
+                dev_lon = float(raw_lon)
+            except (ValueError, TypeError):
+                pass
+
+    origin_dict = None
+    dest_dict = None
+
+    # Priority 2: Route (if query indicates a passage between locations)
+    if has_route:
+        if raw_dest:
+            dest_res = gis_agent.resolve_location(raw_dest)
+            dest_dict = {
+                "name": dest_res.get("name", raw_dest),
+                "latitude": dest_res.get("lat"),
+                "longitude": dest_res.get("lon"),
+            }
+        if raw_origin:
+            orig_res = gis_agent.resolve_location(raw_origin)
+            origin_dict = {
+                "name": orig_res.get("name", raw_origin),
+                "latitude": orig_res.get("lat"),
+                "longitude": orig_res.get("lon"),
+            }
+        elif dev_lat is not None and dev_lon is not None:
+            origin_dict = {
+                "name": f"GPS ({dev_lat:.4f}, {dev_lon:.4f})",
+                "latitude": dev_lat,
+                "longitude": dev_lon,
+            }
+
+        primary_name = origin_dict.get("name") if origin_dict else (dest_dict.get("name") if dest_dict else "Route Corridor")
+        primary_lat = origin_dict.get("latitude") if origin_dict else (dest_dict.get("latitude") if dest_dict else None)
+        primary_lon = origin_dict.get("longitude") if origin_dict else (dest_dict.get("longitude") if dest_dict else None)
+
+        lc = LocationContext(
+            source=LocationSource.ROUTE,
+            status=LocationStatus.RESOLVED if primary_lat is not None else LocationStatus.LOCATION_REQUIRED,
+            name=primary_name,
+            latitude=primary_lat,
+            longitude=primary_lon,
+            origin=origin_dict,
+            destination=dest_dict,
+        )
+        return lc, origin_dict, dest_dict
+
+    # Priority 1: Explicit User Location in Query (supersedes device GPS)
+    if explicit_loc and not is_self_loc:
+        res = gis_agent.resolve_location(explicit_loc)
+        if not res.get("is_unknown"):
+            lc = LocationContext(
+                source=LocationSource.EXPLICIT_QUERY,
+                status=LocationStatus.RESOLVED,
+                name=res.get("name", explicit_loc),
+                latitude=res.get("lat"),
+                longitude=res.get("lon"),
+            )
+            return lc, None, None
+        else:
+            lc = LocationContext(
+                source=LocationSource.EXPLICIT_QUERY,
+                status=LocationStatus.LOCATION_REQUIRED,
+                name=explicit_loc,
+                latitude=None,
+                longitude=None,
+            )
+            return lc, None, None
+
+    # Priority 3: Device GPS (when 'near me' or omitted)
+    if dev_lat is not None and dev_lon is not None:
+        gps_name = f"GPS ({dev_lat:.4f}, {dev_lon:.4f})"
+        nearest_sector = None
+        min_dist = float("inf")
+        import math
+        for s_name, s_coords in gis_agent.COASTAL_SECTORS.items():
+            d = math.hypot(dev_lat - s_coords["lat"], dev_lon - s_coords["lon"])
+            if d < min_dist:
+                min_dist = d
+                nearest_sector = s_coords.get("name") or s_name.title()
+
+        display_name = nearest_sector if min_dist < 1.0 else gps_name
+        lc = LocationContext(
+            source=LocationSource.DEVICE_GPS,
+            status=LocationStatus.RESOLVED,
+            name=display_name,
+            latitude=dev_lat,
+            longitude=dev_lon,
+        )
+        return lc, None, None
+
+    # Priority 4: No location specified and no GPS available (Default = NONE -> LOCATION_REQUIRED)
+    lc = LocationContext(
+        source=LocationSource.DEFAULT,
+        status=LocationStatus.LOCATION_REQUIRED,
+        name=None,
+        latitude=None,
+        longitude=None,
+    )
+    return lc, None, None
+
+
 class ManagerAgent:
     """
     ManagerAgent acts as the central Agentic Orchestrator for Project ORCA.
@@ -244,8 +484,8 @@ class ManagerAgent:
             "Key Responsibilities:\n"
             "1. CONVERSATIONAL MEMORY & CONTEXT RESOLUTION:\n"
             "   Review conversational history to resolve missing context, pronouns, or references across turns. "
-            "For example, if turn 1 discusses 'Thoothukudi' and turn 2 asks 'is it safe to sail there tomorrow?', "
-            "resolve 'there' to 'Thoothukudi'.\n\n"
+            "For example, if turn 1 discusses 'Mumbai' and turn 2 asks 'is it safe to sail there tomorrow?', "
+            "resolve 'there' to 'Mumbai'.\n\n"
             "2. STAKEHOLDER PERSONA CLASSIFICATION:\n"
             "   Classify the user into one of: 'FISHERMAN', 'MARITIME_AUTHORITY', 'DISASTER_MANAGEMENT', 'RESEARCHER', 'MARITIME_OPERATOR', 'UNKNOWN'.\n\n"
             "3. LANGUAGE IDENTIFICATION:\n"
@@ -387,20 +627,28 @@ class ManagerAgent:
             raw_audio_base64 = user_input.get("raw_audio_base64")
             input_type = str(user_input.get("input_type", "TEXT" if raw_text else "AUDIO")).upper()
 
-            lat = float(device_telemetry.get("latitude", 8.7642))
-            lon = float(device_telemetry.get("longitude", 78.1348))
+            raw_lat = device_telemetry.get("latitude")
+            raw_lon = device_telemetry.get("longitude")
+            lat = float(raw_lat) if raw_lat is not None else None
+            lon = float(raw_lon) if raw_lon is not None else None
 
             query_text = ""
             if raw_text and str(raw_text).strip():
                 query_text = str(raw_text).strip()
             elif input_type == "AUDIO" and raw_audio_base64:
-                query_text = (
-                    f"Voice Request: Identify optimal fishing zones and maritime sea safety near coordinates ({lat:.4f}, {lon:.4f})"
-                )
+                if lat is not None and lon is not None:
+                    query_text = (
+                        f"Voice Request: Identify optimal fishing zones and maritime sea safety near coordinates ({lat:.4f}, {lon:.4f})"
+                    )
+                else:
+                    query_text = "Voice Request: Identify optimal fishing zones and maritime sea safety"
             else:
-                query_text = (
-                    f"Where can I go fishing today near coordinates ({lat:.4f}, {lon:.4f}) and is it safe to sail?"
-                )
+                if lat is not None and lon is not None:
+                    query_text = (
+                        f"Where can I go fishing today near coordinates ({lat:.4f}, {lon:.4f}) and is it safe to sail?"
+                    )
+                else:
+                    query_text = "Where can I go fishing today and is it safe to sail?"
 
             return {
                 "session_id": session_id,
@@ -428,11 +676,11 @@ class ManagerAgent:
             "client_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "user_context": {"persona": "FISHERMAN"},
             "device_telemetry": {
-                "latitude": 8.7642,
-                "longitude": 78.1348,
+                "latitude": None,
+                "longitude": None,
                 "gps_accuracy_meters": 4.5,
                 "speed_knots": 0.0,
-                "heading_degrees": 120.5,
+                "heading_degrees": 0.0,
             },
             "user_input": {
                 "input_type": "TEXT",
@@ -454,9 +702,18 @@ class ManagerAgent:
         telemetry = mobile_payload["device_telemetry"]
         user_context = mobile_payload["user_context"]
         effective_query = mobile_payload["effective_query"]
-        lat = telemetry["latitude"]
-        lon = telemetry["longitude"]
-        gps_str = f"{lat:.4f},{lon:.4f}"
+        lat = telemetry.get("latitude")
+        lon = telemetry.get("longitude")
+        gps_str = f"{lat:.4f},{lon:.4f}" if (lat is not None and lon is not None) else None
+
+        loc_extracted = extract_locations_from_query(effective_query)
+        deterministic_locations = []
+        if loc_extracted.get("explicit_location"):
+            deterministic_locations = [loc_extracted["explicit_location"]]
+        elif loc_extracted.get("has_route"):
+            deterministic_locations = [l for l in [loc_extracted.get("origin"), loc_extracted.get("destination")] if l]
+        elif gps_str:
+            deterministic_locations = [gps_str]
 
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
@@ -467,7 +724,7 @@ class ManagerAgent:
                 "analyzed_intent": "Error: GEMINI_API_KEY not found",
                 "user_persona": user_context.get("persona", "FISHERMAN"),
                 "source_language_code": "en",
-                "location_entities": [gps_str],
+                "location_entities": deterministic_locations,
                 "time_entities": [],
                 "execution_plan": [],
                 "urgency_level": "LOW",
@@ -491,12 +748,13 @@ class ManagerAgent:
         app_persona = user_context.get("persona")
         persona_hint = f"Mobile Client Specified Persona: {app_persona}\n" if app_persona else ""
 
+        gps_info_str = f"Latitude {lat:.4f}, Longitude {lon:.4f}" if (lat is not None and lon is not None) else "GPS Unavailable (None)"
         prompt = (
             f"{history_text}"
-            f"Vessel Device Telemetry: Latitude {lat:.4f}, Longitude {lon:.4f}, Speed: {telemetry['speed_knots']} knots, Heading: {telemetry['heading_degrees']} deg.\n"
+            f"Vessel Device Telemetry: {gps_info_str}, Speed: {telemetry['speed_knots']} knots, Heading: {telemetry['heading_degrees']} deg.\n"
             f"{persona_hint}"
             f"Current User Request: \"{effective_query}\"\n\n"
-            f"Note: If the user refers to 'here', 'current position', or doesn't mention another coastal port, use GPS coordinates '{gps_str}' as the location entity.\n"
+            f"Note: If the user mentions an explicit coastal location (e.g., 'Mumbai', 'Chennai', 'Kochi'), use that explicit location. If the user refers to 'here', 'current position', or 'near me' and GPS is available, use GPS coordinates '{gps_str}' as the location entity.\n"
             "Analyze the current query in light of telemetry & conversational history and output the JSON routing plan."
         )
 
@@ -513,7 +771,7 @@ class ManagerAgent:
                 "analyzed_intent": deterministic_intent,
                 "user_persona": user_context.get("persona", "FISHERMAN"),
                 "source_language_code": "en",
-                "location_entities": [gps_str],
+                "location_entities": deterministic_locations,
                 "time_entities": ["today"],
                 "execution_plan": deterministic_plan,
                 "urgency_level": deterministic_urgency,
@@ -541,7 +799,7 @@ class ManagerAgent:
                     "analyzed_intent": deterministic_intent,
                     "user_persona": user_context.get("persona", "FISHERMAN"),
                     "source_language_code": "en",
-                    "location_entities": [gps_str],
+                    "location_entities": deterministic_locations,
                     "time_entities": ["today"],
                     "execution_plan": deterministic_plan,
                     "urgency_level": deterministic_urgency,
@@ -555,7 +813,7 @@ class ManagerAgent:
                 "analyzed_intent": "Error: No response generated",
                 "user_persona": user_context.get("persona", "FISHERMAN"),
                 "source_language_code": "en",
-                "location_entities": [gps_str],
+                "location_entities": deterministic_locations,
                 "time_entities": [],
                 "execution_plan": [],
                 "urgency_level": "LOW",
@@ -823,9 +1081,11 @@ def process_marine_request(
     persona = resolved_persona_enum.value if resolved_persona_enum else None
 
     transcribed_text = None
-    lat = device_telemetry.get("latitude", 8.7642)
-    lon = device_telemetry.get("longitude", 78.1348)
-    gps_str = f"{lat:.4f},{lon:.4f}"
+    lat_val = device_telemetry.get("latitude") if isinstance(device_telemetry, dict) else None
+    lon_val = device_telemetry.get("longitude") if isinstance(device_telemetry, dict) else None
+    lat = float(lat_val) if lat_val is not None else None
+    lon = float(lon_val) if lon_val is not None else None
+    gps_str = f"{lat:.4f},{lon:.4f}" if (lat is not None and lon is not None) else None
 
     # Step 2: Inbound Language / Audio Processing
     original_user_query = (
@@ -1078,6 +1338,68 @@ def process_marine_request(
             persona = resolved_persona_enum.value
             user_context["persona"] = persona
 
+    # Step 2.9: Strict Location Resolution Contract
+    # Enforces: Explicit User Location > Route Origin/Dest > Device GPS > Default (NONE -> LOCATION_REQUIRED)
+    location_context, origin_info, dest_info = resolve_location_context(
+        english_text,
+        device_telemetry=device_telemetry,
+    )
+
+    if location_context.status == LocationStatus.LOCATION_REQUIRED:
+        loc_req_msg = (
+            "Please specify a coastal location or port (e.g., Mumbai, Chennai, Kochi, Goa, Tuticorin, Visakhapatnam) or enable GPS."
+        )
+        if source_lang != "en":
+            try:
+                from language_layer import LanguageLayer
+                ll = LanguageLayer()
+                loc_req_msg_native = ll.translate_advisory(loc_req_msg, source_lang)
+            except Exception:
+                loc_req_msg_native = loc_req_msg
+        else:
+            loc_req_msg_native = loc_req_msg
+
+        return {
+            "success": False,
+            "status": "LOCATION_REQUIRED",
+            "message": loc_req_msg_native,
+            "supported_locations": [
+                "Mumbai", "Chennai", "Kochi", "Goa", "Tuticorin", "Visakhapatnam",
+                "Mangalore", "Kandla", "Porbandar", "Paradip", "Haldia", "Kolkata", "Kanyakumari", "Rameswaram"
+            ],
+            "session_id": session_id,
+            "client_timestamp": client_timestamp,
+            "device_telemetry": device_telemetry,
+            "user_persona": persona or "FISHERMAN",
+            "input_type": "AUDIO" if is_voice else "TEXT",
+            "transcribed_text": transcribed_text,
+            "english_query": english_text,
+            "source_language_code": source_lang,
+            "map_status": "LOCATION_REQUIRED",
+            "recommended_coordinates": "",
+            "risk_assessment": {
+                "risk_score": 0,
+                "threat_level": "LOCATION_REQUIRED",
+                "threats": ["No coastal location or GPS coordinates provided."],
+                "status": "LOCATION_REQUIRED",
+                "summary": loc_req_msg,
+            },
+            "chat_text": loc_req_msg_native,
+            "native_advisory_text": loc_req_msg_native,
+            "audio_payload_base64": None,
+            "safe_sea_route": None,
+            "location_context": location_context.to_dict(),
+            "origin": None,
+            "destination": None,
+            "green_marine_energy": {
+                "solar_irradiance_wm2": 0,
+                "extended_zero_emission_hours": 0.0,
+                "fuel_saved_liters": 0.0,
+                "carbon_offset_kg": 0.0,
+            },
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+
     # Step 3: Pass English text to ManagerAgent
     manager_payload = {
         "session_id": session_id,
@@ -1118,47 +1440,22 @@ def process_marine_request(
     locations = orchestration_result.get("location_entities", [])
     times = orchestration_result.get("time_entities", [])
     plan = orchestration_result.get("execution_plan", [])
-    primary_location = locations[0] if locations else gps_str
     primary_time = times[0] if times else "today"
 
-    dispatched_results = {}
+    dispatched_results = {
+        "location_context": location_context.to_dict(),
+        "primary_location": location_context.name,
+    }
 
-    # Check for explicit route planning from X to Y or to destination
-    target_destination = None
-    m_route = re.search(r"from\s+([a-zA-Z\s]+?)\s+to\s+([a-zA-Z\s]+)", english_text, re.IGNORECASE)
-    if m_route:
-        c_orig = m_route.group(1).strip()
-        c_dest = m_route.group(2).strip()
-        primary_location = c_orig
-        dispatched_results["vessel_location"] = c_orig
-        dispatched_results["destination"] = c_dest
-        target_destination = c_dest
-    elif len(locations) >= 2 and any(k in english_text.lower() for k in ["route", "passage", "navigate", "sail", "waypoint"]):
-        primary_location = locations[0]
-        dispatched_results["vessel_location"] = locations[0]
-        dispatched_results["destination"] = locations[1]
-        target_destination = locations[1]
+    if origin_info:
+        dispatched_results["origin"] = origin_info
+        dispatched_results["vessel_location"] = origin_info.get("name")
     else:
-        if any(k in english_text.lower() for k in ["route to", "navigate to", "sail to", "heading to", "bound for", "passage to"]):
-            m_to = re.search(r"(?:route\s+to|navigate\s+to|sail\s+to|heading\s+to|bound\s+for|passage\s+to)\s+([a-zA-Z\s]+)", english_text, re.IGNORECASE)
-            if m_to:
-                target_destination = m_to.group(1).strip()
-                dispatched_results["destination"] = target_destination
-        elif any(k in english_text.lower() for k in ["srilanka", "sri lanka", "colombo"]) and any(k in english_text.lower() for k in ["route", "passage", "sail", "navigate"]):
-            target_destination = "Colombo Port"
-            dispatched_results["destination"] = target_destination
+        dispatched_results["vessel_location"] = location_context.name or (f"{location_context.latitude:.4f},{location_context.longitude:.4f}" if location_context.latitude is not None else None)
 
-    gis_task_str = f"Check EEZ boundary, shipping lanes, and navigation corridor. {english_text}"
-    if target_destination:
-        gis_task_str = f"Plan route to {target_destination}. {gis_task_str}"
-
-    vessel_loc = dispatched_results.get("vessel_location", primary_location)
-    dest_val = dispatched_results.get("destination", target_destination)
-    if vessel_loc:
-        dispatched_results["vessel_location"] = vessel_loc
-    if dest_val:
-        dispatched_results["destination"] = dest_val
-        dispatched_results["target_location"] = dest_val
+    if dest_info:
+        dispatched_results["destination"] = dest_info.get("name")
+        dispatched_results["target_location"] = dest_info.get("name")
 
     # Dynamically execute only domain agents specified in the execution plan
     for step in plan:
@@ -1170,7 +1467,7 @@ def process_marine_request(
         if agent_instance and ag_name not in dispatched_results:
             try:
                 out = agent_instance.execute_task(
-                    location=primary_location,
+                    location=location_context,
                     time_frame=primary_time,
                     task_instructions=t_instr,
                     expected_format=exp_fmt,
@@ -1179,39 +1476,19 @@ def process_marine_request(
                 dispatched_results[ag_name] = out
             except Exception as _ag_err:
                 print(f"[Agent Execution Warning] {ag_name} task notice: {_ag_err}")
-                if ag_name == "WEATHER_AGENT":
-                    dispatched_results[ag_name] = {
-                        "telemetry": {"wind_speed_kmh": 14.0, "gust_speed_kmh": 18.0, "wind_direction": "SW", "rainfall_mmh": 0.0, "visibility_km": 10.0, "pressure_hpa": 1012.0},
-                        "wave_height_m": 1.2,
-                        "status": "SAFE",
-                    }
-                elif ag_name == "OCEAN_AGENT":
-                    dispatched_results[ag_name] = {
-                        "data": {"statistics": {"max_wave_height_m": 1.2, "max_current_speed_knots": 0.8}},
-                        "wave_height_m": [1.2],
-                        "status": "SAFE",
-                    }
-                elif ag_name == "DISASTER_AGENT":
-                    dispatched_results[ag_name] = {
-                        "status": "SAFE",
-                        "hazard_summary": {"has_active_hazard": False, "hazard_status": "NONE_ACTIVE", "description": "No active cyclones or storm warnings."},
-                        "advisory": "No active cyclone, tsunami, or storm surge warnings.",
-                    }
-                elif ag_name == "PFZ_AGENT":
-                    dispatched_results[ag_name] = {
-                        "geojson": {
-                            "features": [
-                                {
-                                    "properties": {
-                                        "suitability_score": 92,
-                                        "centroid_lat": 9.0932,
-                                        "centroid_lon": 78.3218,
-                                        "likely_catch": ["Yellowfin Tuna", "Mackerel", "Sardine"],
-                                    }
-                                }
-                            ]
-                        }
-                    }
+                p_lat = location_context.latitude or 18.9220
+                p_lon = location_context.longitude or 72.8347
+                p_name = location_context.name or "Operational Sector"
+                dispatched_results[ag_name] = {
+                    "agent": ag_name,
+                    "location": {"name": p_name, "latitude": p_lat, "longitude": p_lon},
+                    "status": "DATA_UNAVAILABLE",
+                    "error": f"Agent execution error: {_ag_err}",
+                    "summary": f"Data for {ag_name} is currently unavailable for {p_name}.",
+                    "advisory": f"{ag_name} telemetry could not be retrieved. Exercise caution and verify with local maritime authorities.",
+                    "is_live_satellite": False,
+                    "metadata": {"source": "DATA_UNAVAILABLE", "error": str(_ag_err)},
+                }
 
     # Step 5: DecisionEngine Final Synthesis
     normalized_query = english_text
@@ -1221,7 +1498,7 @@ def process_marine_request(
     dispatched_results["analyzed_intent"] = orchestration_result.get("analyzed_intent")
     dispatched_results["execution_plan"] = plan
     if "vessel_location" not in dispatched_results:
-        dispatched_results["vessel_location"] = primary_location
+        dispatched_results["vessel_location"] = location_context.name or (f"{location_context.latitude:.4f},{location_context.longitude:.4f}" if location_context.latitude is not None else None)
     dispatched_results["device_telemetry"] = device_telemetry
     final_payload = run_decision_engine(
         dispatched_results,
@@ -1277,6 +1554,9 @@ def process_marine_request(
     final_payload["reply"] = native_advisory
     final_payload["response"] = native_advisory
     final_payload["message"] = native_advisory
+    final_payload["location_context"] = location_context.to_dict()
+    final_payload["origin"] = origin_info
+    final_payload["destination"] = dest_info
     final_payload["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     return final_payload
@@ -1326,14 +1606,14 @@ if __name__ == "__main__":
                     request_data = {
                         "session_id": "sess_cli",
                         "user_context": {"persona": None},
-                        "device_telemetry": {"latitude": 8.7642, "longitude": 78.1348},
+                        "device_telemetry": {"latitude": None, "longitude": None},
                         "user_input": {"input_type": "TEXT", "raw_text": raw_input_line}
                     }
             else:
                 request_data = {
                     "session_id": "sess_cli",
                     "user_context": {"persona": None},
-                    "device_telemetry": {"latitude": 8.7642, "longitude": 78.1348},
+                    "device_telemetry": {"latitude": None, "longitude": None},
                     "user_input": {"input_type": "TEXT", "raw_text": raw_input_line}
                 }
 

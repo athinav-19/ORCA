@@ -1,0 +1,17 @@
+{
+  "model_name": "DisasterPredictionModel",
+  "model_type": "XGBoost",
+  "version": "v4.0",
+  "official_description": "ORCA 24h Cyclone & Marine Hazard Prediction Model v4.0 trained on verified NOAA IBTrACS and ECMWF ERA5 reanalysis data.",
+  "prediction_horizon_hours": 24,
+  "target_variable": "target_hazard_24h",
+  "trained_at": "2026-09-16T08:59:38.823336",
+  "data_source": "NOAA/NCEI IBTrACS v04r01 North Indian Ocean + ECMWF ERA5 Ambient Reanalysis",
+  "training_period": "1980 to 2022",
+  "validation_period": "2023 to 2024",
+  "test_period": "2025 to 2025",
+  "train_samples": 23035,
+  "validation_samples": 1108,
+  "test_samples": 649,
+  "leakage_safeguards": "Strict storm-disjoint chronological split, independent future target at t+24h, zero target in input"
+}

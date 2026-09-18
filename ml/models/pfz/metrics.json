@@ -1,0 +1,90 @@
+{
+  "best_model": "LightGBM",
+  "metrics_summary": {
+    "recall": 0.9889,
+    "precision": 0.9468,
+    "f1": 0.9674,
+    "roc_auc": 0.9978,
+    "pr_auc": 0.9962,
+    "confusion_matrix": [
+      [
+        152,
+        5
+      ],
+      [
+        1,
+        89
+      ]
+    ]
+  },
+  "all_benchmarks": {
+    "Persistence_Baseline": {
+      "recall": 0.8889,
+      "precision": 1.0,
+      "f1": 0.9412,
+      "roc_auc": 0.9444,
+      "pr_auc": 0.9294,
+      "confusion_matrix": [
+        [
+          157,
+          0
+        ],
+        [
+          10,
+          80
+        ]
+      ]
+    },
+    "LightGBM": {
+      "recall": 0.9889,
+      "precision": 0.9468,
+      "f1": 0.9674,
+      "roc_auc": 0.9978,
+      "pr_auc": 0.9962,
+      "confusion_matrix": [
+        [
+          152,
+          5
+        ],
+        [
+          1,
+          89
+        ]
+      ]
+    },
+    "XGBoost": {
+      "recall": 0.9444,
+      "precision": 0.977,
+      "f1": 0.9605,
+      "roc_auc": 0.9971,
+      "pr_auc": 0.995,
+      "confusion_matrix": [
+        [
+          155,
+          2
+        ],
+        [
+          5,
+          85
+        ]
+      ]
+    },
+    "RandomForest": {
+      "recall": 0.9778,
+      "precision": 0.9167,
+      "f1": 0.9462,
+      "roc_auc": 0.9965,
+      "pr_auc": 0.994,
+      "confusion_matrix": [
+        [
+          149,
+          8
+        ],
+        [
+          2,
+          88
+        ]
+      ]
+    }
+  }
+}

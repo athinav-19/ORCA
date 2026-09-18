@@ -1,0 +1,33 @@
+{
+    "user_credentials": {
+        "username/email": "YOUR_MOSDAC_USERNAME",
+        "username": "YOUR_MOSDAC_USERNAME",
+        "password": "YOUR_MOSDAC_PASSWORD"
+    },
+    "search_parameters": {
+        "datasetId": "3RIMG_L2B_IMC",
+        "startTime": "2026-09-17",
+        "endTime": "2026-09-18",
+        "count": "3",
+        "boundingBox": "65.0,5.0,97.0,30.0",
+        "gId": ""
+    },
+    "supported_datasets": [
+        "3RIMG_L2B_LST",
+        "3RIMG_L2B_HEM",
+        "3RIMG_L2B_OLR",
+        "3RIMG_L2B_CTP",
+        "3OOCM_L2B_OCM",
+        "3OSCAT_L2B_WND",
+        "SARAL_L2P_SWH",
+        "3RIMG_L2B_FOG",
+        "3RIMG_L2B_IMC"
+    ],
+    "download_settings": {
+        "download_path": "./data/mosdac_cache",
+        "organize_by_date": false,
+        "skip_user_input": true,
+        "generate_error_logs": true,
+        "error_logs_dir": "./logs"
+    }
+}

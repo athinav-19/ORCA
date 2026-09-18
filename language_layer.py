@@ -162,6 +162,9 @@ class LanguageLayer:
         "ராமேசுவரம்": "Rameswaram",
         "சென்னை": "Chennai",
         "கன்னியாகுமரி": "Kanyakumari",
+        "மும்பை": "Mumbai",
+        "கொச்சி": "Kochi",
+        "கோவா": "Goa",
         "மீன்பிடிக்க": "go fishing",
         "மீன்பிடி": "fishing",
         "மீன்": "fish",
@@ -182,6 +185,7 @@ class LanguageLayer:
         "चेन्नई": "Chennai",
         "कन्याकुमारी": "Kanyakumari",
         "मुंबई": "Mumbai",
+        "गोवा": "Goa",
         "पोरबंदर": "Porbandar",
         "वेरावल": "Veraval",
         "कोच्चि": "Kochi",
@@ -203,6 +207,8 @@ class LanguageLayer:
         "തൂത്തുക്കുടി": "Thoothukudi",
         "വിഴിഞ്ഞം": "Vizhinjam",
         "ബേപ്പൂർ": "Beypore",
+        "മുംബൈ": "Mumbai",
+        "ഗോവ": "Goa",
         "മീൻ": "fish",
         "പോകാമോ": "can I go",
         "ഇന്ന്": "today",
@@ -210,13 +216,19 @@ class LanguageLayer:
         "കാലാവസ്ഥ": "weather",
         "തിരമാല": "wave",
         # Gujarati terms
+        "મુંબઈ": "Mumbai",
+        "ગોવા": "Goa",
         "પોરબંદર": "Porbandar",
         "વેરાવળ": "Veraval",
         "ઓખા": "Okha",
         "કંડલા": "Kandla",
+        "માછીમારી": "fishing",
+        "માછલી": "fish",
         "હવામાન": "weather",
         "મોજા": "waves",
+        "વાવાઝોડું": "cyclone",
         # Bengali terms
+        "মুম্বই": "Mumbai",
         "দিঘা": "Digha",
         "হলদিয়া": "Haldia",
         "পারাদীপ": "Paradip",
@@ -329,14 +341,16 @@ class LanguageLayer:
         if any(g in cleaned_lower for g in ["hello", "hi", "how are you", "thank you", "help", "captain"]):
             return cleaned
 
-        # If significant non-ASCII characters remain, provide a contextual fallback
+        # If significant non-ASCII characters remain, provide a contextual fallback if a port is identified
         if any(ord(c) > 127 for c in cleaned):
-            port = "Thoothukudi"
-            for p in ["Thoothukudi", "Rameswaram", "Chennai", "Kanyakumari", "Kochi"]:
+            port = None
+            for p in ["Mumbai", "Goa", "Chennai", "Kochi", "Thoothukudi", "Tuticorin", "Rameswaram", "Kanyakumari", "Visakhapatnam", "Porbandar", "Veraval", "Mangalore", "Paradip", "Digha"]:
                 if p.lower() in cleaned.lower():
                     port = p
                     break
-            return f"Where can I go fishing today near {port} and are the sea conditions safe?"
+            if port:
+                return f"Where can I go fishing today near {port} and are the sea conditions safe?"
+            return cleaned
 
         return cleaned
 
@@ -358,7 +372,7 @@ class LanguageLayer:
                 "original_query": "",
                 "source_language_code": "en",
                 "language_name": "English",
-                "english_query": "where can i go fishing today near thoothukudi?",
+                "english_query": "",
                 "confidence": 1.0,
                 "engine": "default_empty",
             }
@@ -602,7 +616,7 @@ if __name__ == "__main__":
     sample_advisory = (
         "[GO ADVISORY (CONDITIONS FAVORABLE)] Sea conditions are favorable for maritime operations. "
         "Wind speeds (3.8 km/h) and wave heights (1.2m) remain within safe limits. "
-        "Vessels may proceed to target coordinates [9.0932,78.3218]."
+        "Vessels may proceed to target coordinates [18.9220,72.8347]."
     )
     ta_advisory = layer.translate_advisory(sample_advisory, "ta")
     print(f"English Original : {sample_advisory}")

@@ -1,0 +1,38 @@
+{
+  "features": [
+    "latitude",
+    "longitude",
+    "month_sin",
+    "month_cos",
+    "sst_c",
+    "sst_gradient",
+    "chlorophyll_a_mg_m3",
+    "chlorophyll_gradient",
+    "current_speed_knots",
+    "wind_speed_kmh",
+    "wind_stress",
+    "bathymetry_depth_m",
+    "distance_to_coast_nm",
+    "upwelling_index",
+    "sst_lag_24h",
+    "chl_lag_24h"
+  ],
+  "feature_importance": {
+    "latitude": 190.0,
+    "longitude": 136.0,
+    "month_sin": 213.0,
+    "month_cos": 295.0,
+    "sst_c": 394.0,
+    "sst_gradient": 156.0,
+    "chlorophyll_a_mg_m3": 183.0,
+    "chlorophyll_gradient": 35.0,
+    "current_speed_knots": 93.0,
+    "wind_speed_kmh": 104.0,
+    "wind_stress": 0.0,
+    "bathymetry_depth_m": 63.0,
+    "distance_to_coast_nm": 25.0,
+    "upwelling_index": 163.0,
+    "sst_lag_24h": 607.0,
+    "chl_lag_24h": 413.0
+  }
+}

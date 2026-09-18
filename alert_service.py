@@ -602,8 +602,8 @@ class AlertService:
     def process_disaster_agent_output(
         cls,
         disaster_output: Dict[str, Any],
-        lat: float = 8.7642,
-        lon: float = 78.1348
+        lat: Optional[float] = None,
+        lon: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Connects Disaster Agent & Risk Analysis findings to proactive alert dispatch:
@@ -612,6 +612,15 @@ class AlertService:
         - If sea state is normal/fair, safely takes no action.
         """
         if not isinstance(disaster_output, dict):
+            return None
+
+        if lat is None or lon is None:
+            loc_info = disaster_output.get("location") or {}
+            if isinstance(loc_info, dict):
+                lat = loc_info.get("latitude")
+                lon = loc_info.get("longitude")
+
+        if lat is None or lon is None:
             return None
 
         hazard_summary = disaster_output.get("hazard_summary") or {}

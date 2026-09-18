@@ -1,0 +1,32 @@
+{
+  "features": [
+    "latitude",
+    "longitude",
+    "month_sin",
+    "month_cos",
+    "hour_sin",
+    "hour_cos",
+    "wind_speed_kmh",
+    "wind_dir_deg",
+    "u_wind_kmh",
+    "v_wind_kmh",
+    "surface_pressure_hpa",
+    "precipitation_mm",
+    "relative_humidity_pct",
+    "temperature_2m_c",
+    "wave_height_m",
+    "wave_period_s",
+    "wind_lag_6h",
+    "wind_lag_12h",
+    "wind_lag_24h",
+    "pres_diff_6h",
+    "wave_lag_6h"
+  ],
+  "horizons": [
+    6,
+    12,
+    24,
+    48,
+    72
+  ]
+}

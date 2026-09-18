@@ -1,0 +1,29 @@
+{
+  "model_name": "WeatherMarineForecastModel",
+  "model_type": "MultiHorizon_LightGBM_Regressor",
+  "version": "v4.0",
+  "official_description": "ORCA Multi-Horizon Weather Model v4.0 trained on verified ECMWF reanalysis and operational analysis data, with source-specific provenance.",
+  "horizons_hours": [
+    6,
+    12,
+    24,
+    48,
+    72
+  ],
+  "trained_at": "2026-09-16T08:43:27.496836",
+  "data_provenance_by_date": {
+    "1980-01-01 to 2023-12-31": "ECMWF ERA5 Consolidated Reanalysis [REANALYSIS] (94.2% of dataset)",
+    "2024-01-01 to 2026-06-30": "ECMWF ERA5T Preliminary Reanalysis [REANALYSIS (PRELIMINARY ERA5T)] (5.3% of dataset)",
+    "2026-07-01 to 2026-09-16": "ECMWF IFS Operational Analysis [OPERATIONAL_ANALYSIS] (0.5% of dataset)"
+  },
+  "training_period": "1980-01-01 to 2022-12-28",
+  "validation_period": "2023-01-01 to 2024-12-28",
+  "test_period": "2025-01-01 to 2026-09-13",
+  "train_samples": 376872,
+  "validation_samples": 17472,
+  "test_samples": 14904,
+  "primary_predictand": "target_wind_{h}h",
+  "persistence_comparison": "LightGBM benchmarked against genuine persistence baseline across all evaluation horizons",
+  "leakage_safeguards": "Strict temporal separation with 72h horizon boundary buffers, targets measured at future t+h, input lags measured strictly at or before t, zero forward contamination",
+  "derived_variables_note": "wave_height_m and wave_period_s are derived using the oceanographic Pierson-Moskowitz formula and are NOT direct ERA5 observations."
+}

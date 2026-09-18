@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# Local credentials and generated configs with secrets
+config.json
+!config.example.json
+
 # Python cache and bytecode
 __pycache__/
 *.py[cod]
@@ -29,10 +33,18 @@ data/copernicus_cache/
 data/mosdac_cache/
 data/satellite_idempotency_store.json*
 
+# Raw and downloaded training datasets (reproducible via ml/data_ingestion/ scripts)
+data/ibtracs_NI.csv
+data/real_weather_era5/
+data/incois_pfz/
+data/boundaries/
+
 # Local credentials and configuration directories
 .copernicusmarine/
 .credentials/
-config.json
+
+# Conversation and prompt dump files
+user_prompt*.txt
 
 # OS specific files
 .DS_Store

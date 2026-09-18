@@ -1,0 +1,58 @@
+{
+  "DISASTER": "COMPLETED",
+  "WEATHER": "COMPLETED",
+  "OCEAN": "DETERMINISTIC",
+  "PFZ": "PENDING_REAL_GROUND_TRUTH",
+  "OVERALL": "HARDENED_REAL_DATA_PIPELINE",
+  "last_updated": "2026-09-16T09:00:00",
+  "version": "v4.0-RealData-Verified",
+  "notes": {
+    "weather": "Retrained on genuine ECMWF ERA5 reanalysis & operational analysis (1980-01-01 to 2026-09-13). 409,248 clean samples across 6 Indian EEZ nodes with strict 72h horizon boundary buffers.",
+    "disaster": "Retrained on genuine NOAA/NCEI IBTrACS NI cyclone best tracks (18,168 fixes, 471 storms) + 6,726 ambient ECMWF ERA5 background fixes. Evaluated on unseen 2025 storms. Winner: XGBoost.",
+    "ocean": "Deterministic data-extraction & telemetry-slicing agent (ISRO MOSDAC SARAL-AltiKa / Oceansat-3). NOT an ML-trained predictive model.",
+    "pfz": "Audited per strict zero-leakage directive. INCOIS historical advisories institutionally gated. Zero synthetic pseudo-labels allowed. Excluded from retraining pending genuine historical advisory dataset."
+  },
+  "checklist": {
+    "disaster": {
+      "data_validation": true,
+      "leakage_check": true,
+      "training": true,
+      "validation_eval": true,
+      "unseen_test_eval": true,
+      "model_saved": true,
+      "model_reload": true,
+      "inference_test": true,
+      "regional_diagnostics": true,
+      "seasonal_diagnostics": true
+    },
+    "weather": {
+      "data_validation": true,
+      "leakage_check": true,
+      "training": true,
+      "validation_eval": true,
+      "unseen_test_eval": true,
+      "model_saved": true,
+      "model_reload": true,
+      "inference_test": true,
+      "regional_diagnostics": true,
+      "seasonal_diagnostics": true
+    },
+    "ocean": {
+      "deterministic_verification": true,
+      "satellite_cache_slicing": true,
+      "zero_crash_fallback": true,
+      "ml_model": false
+    },
+    "pfz": {
+      "data_validation": true,
+      "leakage_check": true,
+      "training": false,
+      "validation_eval": false,
+      "unseen_test_eval": false,
+      "model_saved": false,
+      "model_reload": false,
+      "inference_test": false,
+      "reason": "Institutional ground-truth advisory dataset unavailable. Synthetic data strictly forbidden."
+    }
+  }
+}

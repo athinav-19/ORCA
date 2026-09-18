@@ -212,38 +212,37 @@ def resolve_target_coordinates(aggregated_data: Dict[str, Any], query_text: Opti
     Resolves the primary marine target or departure coordinates (lat, lon)
     for forecast queries or routing tasks.
     """
+    gis = GisAgent()
+
+    # 1. Location context
+    loc_ctx = aggregated_data.get("location_context")
+    if loc_ctx:
+        lat = getattr(loc_ctx, "latitude", None) or (loc_ctx.get("latitude") if isinstance(loc_ctx, dict) else None)
+        lon = getattr(loc_ctx, "longitude", None) or (loc_ctx.get("longitude") if isinstance(loc_ctx, dict) else None)
+        if lat is not None and lon is not None:
+            return float(lat), float(lon)
+
+    # 2. Domain agent outputs
+    for agent_key in ["GIS_AGENT", "WEATHER_AGENT", "OCEAN_AGENT", "PFZ_AGENT", "DISASTER_AGENT"]:
+        ag = aggregated_data.get(agent_key)
+        if isinstance(ag, dict):
+            loc_obj = ag.get("location")
+            if isinstance(loc_obj, dict) and loc_obj.get("latitude") is not None and loc_obj.get("longitude") is not None:
+                return float(loc_obj["latitude"]), float(loc_obj["longitude"])
+
+    # 3. Query text resolution
     if query_text:
-        gis = GisAgent()
-        q_low = str(query_text).lower()
-        for alias, sector in gis.COUNTRY_PORT_ALIASES.items():
-            if alias in q_low:
-                return float(sector["lat"]), float(sector["lon"])
-        for name, sector in gis.COASTAL_SECTORS.items():
-            if name in q_low:
-                return float(sector["lat"]), float(sector["lon"])
-        m_loc = re.search(r"\b(?:near|in|at|off|around|to)\s+([a-zA-Z\s]+)", q_low)
-        if m_loc:
-            loc_candidate = m_loc.group(1).strip().split()[0]
-            sec = gis.resolve_location(loc_candidate)
-            if sec and "lat" in sec and "lon" in sec:
-                return float(sec["lat"]), float(sec["lon"])
+        sec = gis.resolve_location(query_text)
+        if sec and not sec.get("is_unknown") and sec.get("lat") is not None and sec.get("lon") is not None:
+            return float(sec["lat"]), float(sec["lon"])
 
-    pfz_out = aggregated_data.get("PFZ_AGENT")
-    if isinstance(pfz_out, dict):
-        features = pfz_out.get("geojson", {}).get("features", [])
-        if features:
-            props = features[0].get("properties", {})
-            c_lat = props.get("centroid_lat")
-            c_lon = props.get("centroid_lon")
-            if c_lat is not None and c_lon is not None:
-                return float(c_lat), float(c_lon)
-
-    v_loc = aggregated_data.get("vessel_location")
-    if not v_loc and "device_telemetry" in aggregated_data:
+    # 4. Device telemetry
+    if "device_telemetry" in aggregated_data:
         dt = aggregated_data["device_telemetry"]
-        if isinstance(dt, dict) and "latitude" in dt and "longitude" in dt:
+        if isinstance(dt, dict) and dt.get("latitude") is not None and dt.get("longitude") is not None:
             return float(dt["latitude"]), float(dt["longitude"])
 
+    v_loc = aggregated_data.get("vessel_location")
     if v_loc and "," in str(v_loc):
         try:
             parts = str(v_loc).split(",")
@@ -251,7 +250,7 @@ def resolve_target_coordinates(aggregated_data: Dict[str, Any], query_text: Opti
         except Exception:
             pass
 
-    return 8.7642, 78.1348
+    return 0.0, 0.0
 
 
 def get_dataset_timestamp(aggregated_data: Dict[str, Any]) -> str:
@@ -613,6 +612,16 @@ class RiskAnalysisAgent:
                     metrics["hazard_active"] = True
                     metrics["hazard_description"] = eq.get("description", "Undersea earthquake tsunami advisory in effect")
 
+            # Check ML Disaster Prediction
+            if "ml_prediction" in disaster_out and isinstance(disaster_out["ml_prediction"], dict):
+                ml_dis = disaster_out["ml_prediction"]
+                metrics["ml_disaster"] = ml_dis
+                if ml_dis.get("is_hazard") and ml_dis.get("hazard_probability", 0.0) >= 0.50:
+                    metrics["hazard_active"] = True
+                    metrics["ml_disaster_risk"] = True
+                    if not metrics.get("hazard_description"):
+                        metrics["hazard_description"] = f"ML Disaster Prediction: {ml_dis.get('hazard_class')} ({ml_dis.get('hazard_probability', 0)*100:.1f}%)"
+
             if "emergency_shelter" in disaster_out:
                 metrics["emergency_shelter"] = disaster_out["emergency_shelter"]
 
@@ -662,10 +671,14 @@ class RiskAnalysisAgent:
         # Extract from PFZ_AGENT output
         pfz_out = aggregated_data.get("PFZ_AGENT")
         if isinstance(pfz_out, dict):
+            if "ml_suitability" in pfz_out and isinstance(pfz_out["ml_suitability"], dict):
+                metrics["ml_pfz"] = pfz_out["ml_suitability"]
             features = pfz_out.get("geojson", {}).get("features", [])
             if features:
                 props = features[0].get("properties", {})
                 metrics["pfz_score"] = int(props.get("suitability_score", 50))
+                if "ml_pfz_probability" in props and props["ml_pfz_probability"] is not None:
+                    metrics["ml_pfz_prob"] = float(props["ml_pfz_probability"])
 
         # =================================================================
         # IMBL Geopolitical Boundary Guardrail Detection
@@ -850,11 +863,12 @@ class RiskAnalysisAgent:
         gis_out = aggregated_data.get("GIS_AGENT", {})
         is_land_error = False
         if isinstance(gis_out, dict):
+            gis_route = gis_out.get("safe_sea_route") or {}
             if (
                 gis_out.get("status") == "LAND_INTERSECTION_ERROR"
                 or gis_out.get("error") == "LAND_INTERSECTION_ERROR"
-                or gis_out.get("safe_sea_route", {}).get("error") == "LAND_INTERSECTION_ERROR"
-                or gis_out.get("safe_sea_route", {}).get("route_status") == "LAND_INTERSECTION_ERROR"
+                or gis_route.get("error") == "LAND_INTERSECTION_ERROR"
+                or gis_route.get("route_status") == "LAND_INTERSECTION_ERROR"
             ):
                 is_land_error = True
 
@@ -931,6 +945,9 @@ class RiskAnalysisAgent:
             threats.append({"type": "CYCLONE_TRACK_COLLISION", "severity": "CRITICAL", "message": threat_msg})
             warnings.append(threat_msg)
 
+        # ML Disaster Hazard Alert Integration baseline
+        ml_dis = metrics.get("ml_disaster", {})
+
         if forecast_active:
             # Bypass real-time MOSDAC state evaluation for main operational status:
             f_wave = forecast_data["max_wave_height_m"]
@@ -970,6 +987,21 @@ class RiskAnalysisAgent:
                 is_danger = True
                 threat_msg = f"Active Maritime Disaster Alert: {metrics['hazard_description'] or 'Severe weather advisory issued'}."
                 threats.append({"type": "DISASTER_ALERT", "severity": "CRITICAL", "message": threat_msg})
+                warnings.append(threat_msg)
+
+            # ML Disaster Hazard Alert Integration
+            if ml_dis and ml_dis.get("is_hazard") and ml_dis.get("hazard_probability", 0.0) >= 0.50:
+                is_danger = True
+                h_class = ml_dis.get("hazard_class", "SEVERE_CYCLONIC_RISK")
+                prob_pct = ml_dis.get("hazard_probability", 0.0) * 100.0
+                horizon = ml_dis.get("prediction_horizon_hours", 24)
+                threat_msg = (
+                    f"ML Disaster Hazard Alert: {h_class} predicted with {prob_pct:.1f}% probability "
+                    f"(Horizon: {horizon}h, Confidence: {ml_dis.get('confidence_score', 0.85)}). "
+                    f"Drivers: {', '.join(ml_dis.get('primary_drivers', ['Deep convective atmospheric plunge']))}. "
+                    f"Safety Protocol: Immediate harbor return / evacuation."
+                )
+                threats.append({"type": "ML_DISASTER_ALERT", "severity": "CRITICAL", "message": threat_msg})
                 warnings.append(threat_msg)
 
             # 3. Deterministic Wind Threat Check
@@ -1047,6 +1079,16 @@ class RiskAnalysisAgent:
         else:
             status = "SAFE"
 
+        # Safety Strictly Overrides Fishing Opportunity
+        if is_danger and (metrics.get("pfz_score", 0) >= 50 or metrics.get("ml_pfz_prob", 0.0) >= 0.50):
+            override_msg = (
+                f"Safety Priority Override: High potential fishing zone identified (PFZ Index: {metrics.get('pfz_score', 0)}, "
+                f"ML Prob: {metrics.get('ml_pfz_prob', 0)*100:.1f}%), but extreme weather / cyclone hazard strictly overrides "
+                f"fishing opportunity. Fishing operations are suspended; seek harbor shelter immediately."
+            )
+            warnings.append(override_msg)
+            threats.append({"type": "SAFETY_OVERRIDES_PFZ", "severity": "CRITICAL", "message": override_msg})
+
         # Calculate composite Risk Score (0 to 100)
         wind_pts = min(35.0, (wind / max(self.wind_danger_limit, 1.0)) * 30.0)
         wave_pts = min(35.0, (wave / max(self.wave_danger_limit, 1.0)) * 30.0)
@@ -1062,6 +1104,9 @@ class RiskAnalysisAgent:
             status = "DANGER"
         elif is_cyclone:
             risk_score = max(base_score, 92.0)
+            status = "DANGER"
+        elif ml_dis and ml_dis.get("is_hazard") and ml_dis.get("hazard_probability", 0.0) >= 0.50:
+            risk_score = max(base_score, 88.0)
             status = "DANGER"
         elif imbl_violation or not within_eez:
             if p_enum == StakeholderPersona.MARITIME_AUTHORITY:
@@ -1134,33 +1179,22 @@ class SafeAlternative:
         "colombo": (6.9428, 79.8412),
     }
 
-    def _resolve_coordinates(self, location: Any) -> Tuple[float, float]:
+    def _resolve_coordinates(self, location: Any) -> Tuple[Optional[float], Optional[float]]:
         """Resolves location string, tuple, or port name to (latitude, longitude)."""
+        if location is None:
+            return None, None
+
         if isinstance(location, (tuple, list)) and len(location) >= 2:
-            return float(location[0]), float(location[1])
+            try:
+                return float(location[0]), float(location[1])
+            except (ValueError, TypeError):
+                return None, None
 
-        if isinstance(location, str):
-            # Check if formatted as "lat,lon"
-            if "," in location:
-                parts = location.split(",")
-                try:
-                    return float(parts[0].strip()), float(parts[1].strip())
-                except ValueError:
-                    pass
+        sec = self.gis_agent.resolve_location(location)
+        if sec and not sec.get("is_unknown") and sec.get("lat") is not None and sec.get("lon") is not None:
+            return float(sec["lat"]), float(sec["lon"])
 
-            # Check known port dictionary
-            key = location.strip().lower()
-            for name, coords in self.KNOWN_PORTS.items():
-                if name in key:
-                    return coords
-
-            # Check GisAgent resolve_location (handles COUNTRY_PORT_ALIASES and COASTAL_SECTORS)
-            sec = self.gis_agent.resolve_location(location)
-            if sec and not sec.get("is_unknown"):
-                return (sec["lat"], sec["lon"])
-
-        # Default fallback: Gulf of Mannar offshore Thoothukudi
-        return (8.7642, 78.1348)
+        return None, None
 
     @staticmethod
     def haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1190,6 +1224,8 @@ class SafeAlternative:
         """
         p_enum = resolve_persona(persona) or StakeholderPersona.FISHERMAN
         orig_lat, orig_lon = self._resolve_coordinates(primary_location)
+        if orig_lat is None or orig_lon is None:
+            orig_lat, orig_lon = 18.9220, 72.8347
         status = threat_data.get("status", "SAFE")
         risk_score = threat_data.get("risk_score", 0.0)
         metrics = threat_data.get("metrics", {})
@@ -1545,6 +1581,7 @@ class ReasoningAgent:
     def __init__(self, model_name: str = DEFAULT_MODEL):
         self.model_name = model_name
         self.model = None
+        self.gis_agent = GisAgent()
         self._init_gemini_model()
 
     def _init_gemini_model(self):
@@ -1598,8 +1635,8 @@ class ReasoningAgent:
             "   }\n\n"
             "3. IN-DOMAIN STRUCTURE: For maritime domain queries, the 'bhashini_text' MUST strictly follow this exact structure:\n"
             "   [STATUS: NO-GO | CAUTION | GO] -> [Core Hazard or Sea Condition Explanation] -> [Immediate Action Directive]\n"
-            "4. GEOGRAPHIC VERIFICATION RULE: Analyze the user's requested location. If the user specifies an inland, non-coastal, or landlocked city (e.g., Sivakasi, Madurai), you MUST explicitly state in the advisory that it is an inland location with no marine access. Inform the user that the generated waypoints correspond to the nearest operational coastal departure harbor (e.g., Thoothukudi) instead.\n"
-            "5. GEOGRAPHIC TARGET COORDINATES: When a marine location, fishing zone, storm center, emergency shelter, or route destination is queried, the advisory MUST explicitly state the geographic feature name, the exact coordinate rounded to 4 decimals (e.g., 'Lat 9.0932° N, Lon 78.3218° E'), and the cardinal direction with distance from the departure position (e.g., 'approximately 22.7 nautical miles northeast of Thoothukudi Outer Harbor'). Avoid unlabelled naked decimal numbers like '8.7642, 78.1348'.\n"
+            "4. GEOGRAPHIC VERIFICATION RULE: Analyze the user's requested location. If the user specifies an inland, non-coastal, or landlocked city (e.g., Sivakasi, Madurai), you MUST explicitly state in the advisory that it is an inland location with no marine access. Inform the user that the generated waypoints correspond to the nearest operational coastal departure harbor instead.\n"
+            "5. GEOGRAPHIC TARGET COORDINATES: When a marine location, fishing zone, storm center, emergency shelter, or route destination is queried, the advisory MUST explicitly state the geographic feature name, the exact coordinate rounded to 4 decimals (e.g., 'Lat 18.9220° N, Lon 72.8347° E'), and the cardinal direction with distance from the departure position (e.g., 'approximately 12.5 nautical miles southwest of the departure harbor'). Avoid unlabelled naked decimal numbers like '18.9220, 72.8347'.\n"
             "6. RELATIVE SPATIAL INSTRUCTIONS: Always use relative spatial navigation directions (e.g., 'navigate 12 nautical miles inland toward sheltered coastal waters', 'steer west towards mainland shore', 'head 8 nautical miles inshore').\n"
             "7. MOBILE MAP REFERENCE: Explicitly instruct the user to view the plotted waypoints directly on the mobile app's map interface.\n"
             "8. NO ACADEMIC JARGON: Never use academic or speculative phrasing (e.g., 'critical conflict between fishing potential and weather', 'divergence of biophysical indicators'). Use urgent, concise broadcast directives.\n"
@@ -1737,11 +1774,12 @@ class ReasoningAgent:
         """
         status = risk_data.get("status", "SAFE")
         risk_score = risk_data.get("risk_score", 20.0)
-        rec_coords = alternative_data.get("safe_coordinates", "8.7642,78.1348")
+        alt_data = alternative_data or {}
+        rec_coords = alt_data.get("safe_coordinates") or alt_data.get("primary_coordinates") or ""
         threats = risk_data.get("threat_prioritization", [])
         metrics = risk_data.get("metrics", {})
         imbl_violation = metrics.get("imbl_violation", False)
-        reroute_distance_nm = alternative_data.get("distance_shift_nm", 12.0)
+        reroute_distance_nm = alt_data.get("distance_shift_nm", 12.0)
         if reroute_distance_nm <= 0:
             reroute_distance_nm = 10.0
 
@@ -1871,9 +1909,27 @@ class ReasoningAgent:
         }
         role_instruction = persona_directives.get(persona_upper, "Role: Marine Intelligence Advisor.")
 
-        wp1_coord = alternative_data.get("primary_coordinates", "8.7642,78.1348")
+        wp1_coord = alternative_data.get("primary_coordinates", "")
         wp2_coord = alternative_data.get("safe_coordinates", rec_coords)
-        departure_harbor = "Thoothukudi (V.O. Chidambaranar Port)"
+        loc_cand = (
+            alternative_data.get("origin_name")
+            or alternative_data.get("location_name")
+            or metrics.get("location_name")
+            or aggregated_data.get("primary_location")
+            or aggregated_data.get("location_context")
+            or aggregated_data.get("location")
+        )
+        departure_harbor = "Operational Harbor"
+        if isinstance(loc_cand, dict):
+            departure_harbor = loc_cand.get("name") or "Operational Harbor"
+        elif loc_cand and hasattr(loc_cand, "location_name"):
+            departure_harbor = loc_cand.location_name
+        elif loc_cand and isinstance(loc_cand, str):
+            sec_h = self.gis_agent.resolve_location(loc_cand)
+            if not sec_h.get("is_unknown"):
+                departure_harbor = sec_h.get("name") or loc_cand
+            else:
+                departure_harbor = loc_cand
 
         prompt_parts = [
             f"Persona: {persona_upper}",
@@ -1953,13 +2009,42 @@ class ReasoningAgent:
                 "",
             ])
 
+        # Structured ML Prediction Evidence for ReasoningAgent
+        ml_dis = metrics.get("ml_disaster") or (aggregated_data.get("DISASTER_AGENT", {}).get("ml_prediction") if isinstance(aggregated_data.get("DISASTER_AGENT"), dict) else None)
+        ml_wth = aggregated_data.get("WEATHER_AGENT", {}).get("ml_forecast") if isinstance(aggregated_data.get("WEATHER_AGENT"), dict) else None
+        ml_pfz = aggregated_data.get("PFZ_AGENT", {}).get("ml_suitability") if isinstance(aggregated_data.get("PFZ_AGENT"), dict) else None
+
+        ml_prompt_section = ["", "STRUCTURED ML PREDICTION EVIDENCE (Ground truth models, do not invent predictions):"]
+        if ml_dis:
+            dis_prob = ml_dis.get("hazard_probability")
+            dis_prob_str = f"{(dis_prob * 100):.1f}%" if dis_prob is not None else "N/A"
+            ml_prompt_section.append(
+                f"- Disaster ML Prediction: Hazard Class={ml_dis.get('hazard_class')} | Probability={dis_prob_str} | Severity={ml_dis.get('severity_level')} | Horizon={ml_dis.get('prediction_horizon_hours')}h | Confidence={ml_dis.get('confidence_score')} | Drivers={ml_dis.get('primary_drivers')}"
+            )
+        if ml_wth and ml_wth.get("forecast_table"):
+            ft_str = ", ".join([f"{f['horizon']}:{f['wind_speed_kmh']}km/h" for f in ml_wth["forecast_table"][:3]])
+            ml_prompt_section.append(
+                f"- Weather ML Forecast (Multi-Horizon): {ft_str} | Trend={ml_wth.get('trend_assessment')}"
+            )
+        if ml_pfz:
+            pfz_prob = ml_pfz.get("pfz_probability")
+            pfz_prob_str = f"{(pfz_prob * 100):.1f}%" if pfz_prob is not None else "N/A"
+            ml_prompt_section.append(
+                f"- PFZ Habitat Suitability ML: Probability={pfz_prob_str} | Status={ml_pfz.get('recommended_action')} | Confidence={ml_pfz.get('confidence_score')}"
+            )
+            if ml_dis and ml_dis.get("is_hazard"):
+                ml_prompt_section.append(
+                    "- SAFETY OVERRIDE MANDATE: Severe marine hazard/cyclone risk is active. Safety strictly overrides fishing potential; advise immediate harbor shelter."
+                )
+        prompt_parts.extend(ml_prompt_section)
+
         prompt_parts.extend([
             "",
             "LOCATION CONTRAST CONTEXT & GEOGRAPHIC VERIFICATION RULE:",
             "- Analyze the user's requested location in 'User Text Query'.",
             "- If the user specifies an inland, non-coastal, or landlocked city (e.g., Sivakasi, Madurai, Coimbatore, Tirunelveli): "
             "you MUST explicitly state in the advisory that it is an inland location with no marine access. "
-            "Inform the user that the generated waypoints correspond to the nearest operational coastal departure harbor (Thoothukudi) instead.",
+            "Inform the user that the generated waypoints correspond to the nearest operational coastal departure harbor instead.",
             "- Contrast the user's text query with the WP 1 (Departure) coordinate. If the text says 'Sivakasi' but WP1 is a marine coordinate, "
             "you must bridge that gap logically for the user rather than blindly generating a marine route for an inland city.",
             "",
@@ -1987,7 +2072,7 @@ class ReasoningAgent:
 
         prompt_parts.extend([
             f"2. MATHEMATICAL DISTANCE SYNCHRONIZATION: Do not invent distances. Use the provided reroute_distance_nm ({reroute_distance_nm} nautical miles) in your text advisory.",
-            "3. COORDINATE NOTATION RULE: Do NOT write unlabelled comma-separated decimal coordinate pairs (e.g., '8.7642, 78.1348' or '[8.7642, 78.1348]'). Whenever mentioning geographic targets, always use standard notation format: 'Lat XX.XXXX° N, Lon YY.YYYY° E' along with relative distance and cardinal direction from departure harbor (e.g., 'The high-yield fishing zone is located at Lat 9.0932° N, Lon 78.3218° E, approximately 22.7 nautical miles northeast of Thoothukudi Outer Harbor.').",
+            "3. COORDINATE NOTATION RULE: Do NOT write unlabelled comma-separated decimal coordinate pairs (e.g., '18.9220, 72.8347' or '[18.9220, 72.8347]'). Whenever mentioning geographic targets, always use standard notation format: 'Lat XX.XXXX° N, Lon YY.YYYY° E' along with relative distance and cardinal direction from departure harbor (e.g., 'The high-yield fishing zone is located at Lat 18.9220° N, Lon 72.8347° E, approximately 12.5 nautical miles southwest of the departure harbor.').",
             "4. NO ACADEMIC JARGON: Never write speculative phrases like 'critical conflict between fishing potential and extreme weather'. Active operators require urgent, actionable phrasing.",
             "5. RETURN FORMAT: Return strictly valid JSON matching:",
             '   {"bhashini_text": "...", "text_advisory_local": "...", "map_status": "...", "recommended_coordinates": "..."}.'
@@ -2090,7 +2175,7 @@ class ReasoningAgent:
 
         inland_prefix = ""
         if detected_inland:
-            inland_prefix = f"Geographic Notice: {detected_inland} is an inland location with no marine access. Plotted waypoints correspond to the nearest operational coastal departure harbor at Thoothukudi. "
+            inland_prefix = f"Geographic Notice: {detected_inland} is an inland location with no marine access. Plotted waypoints correspond to the nearest operational coastal departure harbor at {departure_harbor}. "
 
         target_sentence = ""
         if ocean_target and ocean_target.get("target_coordinates"):
@@ -2100,16 +2185,16 @@ class ReasoningAgent:
             t_dist = ocean_target.get("distance_nm", dist_nm)
             t_card = (ocean_target.get("cardinal_direction_full") or ocean_target.get("cardinal_direction") or "northeast").lower()
             if ft == "PFZ Aggregation Hotspot":
-                target_sentence = f"The high-yield fishing zone is located at {t_coords}, approximately {t_dist:.1f} nautical miles {t_card} of Thoothukudi Outer Harbor ({l_ref})."
+                target_sentence = f"The high-yield fishing zone is located at {t_coords}, approximately {t_dist:.1f} nautical miles {t_card} of {departure_harbor} ({l_ref})."
             elif ft == "Storm Eye / Center Coordinate":
                 rmw = ocean_target.get("details", {}).get("radius_max_winds_nm", 25.0)
-                target_sentence = f"The storm center is located at {t_coords}, approximately {t_dist:.1f} nautical miles {t_card} of Thoothukudi Outer Harbor ({l_ref}) with radius of maximum winds {rmw:.0f} NM."
+                target_sentence = f"The storm center is located at {t_coords}, approximately {t_dist:.1f} nautical miles {t_card} of {departure_harbor} ({l_ref}) with radius of maximum winds {rmw:.0f} NM."
             elif ft == "Hazard Impact / Evacuation Boundary":
                 s_name = ocean_target.get("details", {}).get("shelter_name", "Designated Emergency Shelter")
-                target_sentence = f"The emergency shelter boundary ({s_name}) is located at {t_coords}, approximately {t_dist:.1f} nautical miles {t_card} of Thoothukudi Outer Harbor ({l_ref})."
+                target_sentence = f"The emergency shelter boundary ({s_name}) is located at {t_coords}, approximately {t_dist:.1f} nautical miles {t_card} of {departure_harbor} ({l_ref})."
             else:
                 d_name = ocean_target.get("details", {}).get("destination_name", "fairway corridor")
-                target_sentence = f"The navigational waypoint for {d_name} is located at {t_coords}, approximately {t_dist:.1f} nautical miles {t_card} of Thoothukudi Outer Harbor ({l_ref})."
+                target_sentence = f"The navigational waypoint for {d_name} is located at {t_coords}, approximately {t_dist:.1f} nautical miles {t_card} of {departure_harbor} ({l_ref})."
 
         target_addon = f" {target_sentence}" if target_sentence else ""
 
@@ -2152,7 +2237,7 @@ class ReasoningAgent:
             else:
                 status_tag = "STATUS: GO."
                 explanation = (
-                    f"STATUS: GO. No tropical cyclone or severe storm is currently detected in your maritime operating sector (Thoothukudi / Gulf of Mannar). "
+                    f"STATUS: GO. No tropical cyclone or severe storm is currently detected in your maritime operating sector ({departure_harbor}). "
                     f"ISRO MOSDAC scatterometer and radar telemetry confirm clear conditions. Sustained wind speed is {w_spd:.1f} km/h ({w_dir}) and wave height is {w_ht:.1f} meters. "
                     f"Maritime conditions are safe for routine operations."
                 )
@@ -2191,24 +2276,36 @@ class ReasoningAgent:
                 features = pfz_agent.get("geojson", {}).get("features", []) if isinstance(pfz_agent, dict) else []
                 if features:
                     props = features[0].get("properties", {})
-                    t_lat = props.get("centroid_lat", 9.0932)
-                    t_lon = props.get("centroid_lon", 78.3218)
+                    t_lat = props.get("centroid_lat")
+                    t_lon = props.get("centroid_lon")
                     score = props.get("suitability_score", 92)
                     catch = ", ".join(props.get("likely_catch", ["Yellowfin Tuna", "Mackerel", "Sardine"]))
+                    coord_str = f"at Latitude {t_lat:.4f}° N, Longitude {t_lon:.4f}° E" if (t_lat is not None and t_lon is not None) else ""
                     explanation = (
-                        f"STATUS: GO. Optimal Potential Fishing Zone (PFZ) identified at Latitude {t_lat:.4f}° N, Longitude {t_lon:.4f}° E off Thoothukudi. "
+                        f"STATUS: GO. Optimal Potential Fishing Zone (PFZ) identified {coord_str} off {departure_harbor}. "
                         f"Chlorophyll-a front concentration and thermal gradients indicate high pelagic fish aggregation (Suitability: {score}/100) with favorable catch probability for {catch}. "
                         f"Sea surface temperature is {temp:.1f}°C with safe wave heights of {w_ht:.1f} meters. "
                         f"Refer to plotted PFZ waypoints on your mobile map interface."
                     )
-                    rec_coords = f"{t_lat:.4f},{t_lon:.4f}"
+                    rec_coords = f"{t_lat:.4f},{t_lon:.4f}" if (t_lat is not None and t_lon is not None) else ""
                 else:
+                    if wp1_coord and "," in wp1_coord:
+                        p_parts = wp1_coord.split(",")
+                        t_lat = float(p_parts[0])
+                        t_lon = float(p_parts[1])
+                    elif rec_coords and "," in rec_coords:
+                        p_parts = rec_coords.split(",")
+                        t_lat = float(p_parts[0])
+                        t_lon = float(p_parts[1])
+                    else:
+                        t_lat, t_lon = None, None
+                    coord_str = f"at Lat {t_lat:.4f}° N, Lon {t_lon:.4f}° E" if t_lat is not None else ""
                     explanation = (
-                        f"STATUS: GO. High-yield Potential Fishing Zone (PFZ) located at Lat 9.0932° N, Lon 78.3218° E (~22.6 NM NNE off Thoothukudi). "
-                        f"Favorable SST ({temp:.1f}°C) and chlorophyll fronts indicate high pelagic fish aggregation for Tuna, Mackerel, and Sardine (Suitability: 92/100). "
+                        f"STATUS: GO. High-yield Potential Fishing Zone (PFZ) located {coord_str} off {departure_harbor}. "
+                        f"Favorable SST ({temp:.1f}°C) and chlorophyll fronts indicate high pelagic fish aggregation (Suitability: 85/100). "
                         f"Sea state is safe with wave heights of {w_ht:.1f} meters."
                     )
-                    rec_coords = "9.0932,78.3218"
+                    rec_coords = f"{t_lat:.4f},{t_lon:.4f}" if t_lat is not None else ""
 
         elif imbl_violation:
             if p_enum == StakeholderPersona.MARITIME_AUTHORITY:
@@ -2313,9 +2410,15 @@ class ReasoningAgent:
                 status_tag = "STATUS: CAUTION."
                 explanation = f"{status_tag} {inland_prefix}Elevated sea state along the corridor ({w_ht:.1f}m waves). Proceed with heightened navigational vigilance."
             else:
+                dest_name = (
+                    (aggregated_data.get("destination") if isinstance(aggregated_data.get("destination"), str) else (aggregated_data.get("destination") or {}).get("name"))
+                    or alt_data.get("safe_location_name")
+                    or alt_data.get("destination_name")
+                    or "destination"
+                )
                 status_tag = "STATUS: GO."
                 explanation = (
-                    f"{status_tag} {inland_prefix}Route analysis complete. Navigational corridor cleared across {dist_nm:.1f} nautical miles to {alt_data.get('safe_location_name', 'destination')}. "
+                    f"{status_tag} {inland_prefix}Route analysis complete. Navigational corridor cleared across {dist_nm:.1f} nautical miles to {dest_name}. "
                     f"Passage maintains safe clearance from coastal shallows, shipping fairways, and the IMBL border with wave heights at {w_ht:.1f} meters. "
                     f"Refer to plotted waypoints on your mobile map interface."
                 )
@@ -2342,6 +2445,59 @@ class ReasoningAgent:
             "map_status": status if forecast_active else ("CONDITIONAL" if (has_temporal and status == "SAFE") else status),
             "recommended_coordinates": rec_coords,
         }
+
+def check_spatial_consistency(raw_agent_outputs: Dict[str, Any], resolved_query: str = "") -> Dict[str, Any]:
+    """
+    Verifies that locations used by all consulted domain agents are spatially consistent.
+    If the query is not a multi-point route and one agent evaluated a completely different location
+    (e.g., > 150 NM away), flags LOCATION_DATA_MISMATCH and reports the discrepancy.
+    """
+    m_route = re.search(r"from\s+([a-zA-Z\s]+?)\s+to\s+([a-zA-Z\s]+)", resolved_query or "", re.IGNORECASE) if resolved_query else None
+    if m_route:
+        # Route query legitimately spans multiple locations (origin -> destination)
+        return {"is_consistent": True, "route_query": True, "mismatches": []}
+
+    locations = {}
+    for agent_key in ["WEATHER_AGENT", "OCEAN_AGENT", "DISASTER_AGENT", "PFZ_AGENT"]:
+        agent_data = raw_agent_outputs.get(agent_key)
+        if isinstance(agent_data, dict) and "location" in agent_data:
+            loc = agent_data["location"]
+            if isinstance(loc, dict) and loc.get("latitude") is not None and loc.get("longitude") is not None:
+                locations[agent_key] = (float(loc["latitude"]), float(loc["longitude"]), loc.get("name", agent_key))
+
+    if len(locations) < 2:
+        return {"is_consistent": True, "mismatches": []}
+
+    # Reference location from location_context or first agent
+    lc = raw_agent_outputs.get("location_context")
+    if isinstance(lc, dict) and lc.get("latitude") is not None:
+        ref_lat, ref_lon = float(lc["latitude"]), float(lc["longitude"])
+        ref_name = lc.get("name", "Context Location")
+    elif hasattr(lc, "latitude") and lc.latitude is not None:
+        ref_lat, ref_lon = float(lc.latitude), float(lc.longitude)
+        ref_name = getattr(lc, "location_name", "Context Location")
+    else:
+        ref_key, (ref_lat, ref_lon, ref_name) = next(iter(locations.items()))
+
+    import math
+    def haversine_nm(lat1, lon1, lat2, lon2):
+        R_nm = 3440.065
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R_nm * c
+
+    mismatches = []
+    for k, (lat, lon, name) in locations.items():
+        dist = haversine_nm(ref_lat, ref_lon, lat, lon)
+        if dist > 150.0:  # > 150 nautical miles mismatch
+            mismatches.append({"agent": k, "location": name, "distance_nm": round(dist, 1)})
+            print(f"[SpatialConsistency WARNING] Location data mismatch: {k} evaluated {name} ({lat}, {lon}) which is {dist:.1f} NM from reference {ref_name} ({ref_lat}, {ref_lon})")
+
+    if mismatches:
+        return {"is_consistent": False, "flag": "LOCATION_DATA_MISMATCH", "mismatches": mismatches}
+    return {"is_consistent": True, "mismatches": []}
 
 
 # =====================================================================
@@ -2382,6 +2538,11 @@ def run_decision_engine(
         or raw_agent_outputs.get("user_query")
     )
 
+    # Check spatial consistency across domain agent outputs
+    spatial_report = check_spatial_consistency(raw_agent_outputs, resolved_query)
+    if not spatial_report.get("is_consistent"):
+        raw_agent_outputs["spatial_consistency"] = spatial_report
+
     # Detect temporal & forecast intent
     temporal_info = detect_temporal_intent(resolved_query)
     is_future_query = temporal_info.get("is_future_query", False)
@@ -2392,23 +2553,39 @@ def run_decision_engine(
 
     if is_future_query and not is_beyond_24h:
         t_lat, t_lon = resolve_target_coordinates(raw_agent_outputs, resolved_query)
-        forecast_agent = ForecastAgent(timeout=5.0)
-        forecast_data = forecast_agent.fetch_forecast(t_lat, t_lon)
-        if forecast_data and forecast_data.get("success"):
-            print(f"[ForecastAgent] Open-Meteo Marine Forecast fetched for ({t_lat:.4f}, {t_lon:.4f})")
-            print(f"               Max Wave: {forecast_data['max_wave_height_m']}m | Horizon: {forecast_data['time_horizon']}")
-        else:
-            print(f"[ForecastAgent] Forecast API offline / unreachable. Falling back silently to real-time MOSDAC cache.")
-            forecast_offline = True
+        if t_lat is not None and t_lon is not None:
+            forecast_agent = ForecastAgent(timeout=5.0)
+            forecast_data = forecast_agent.fetch_forecast(t_lat, t_lon)
+            if forecast_data and forecast_data.get("success"):
+                print(f"[ForecastAgent] Open-Meteo Marine Forecast fetched for ({t_lat:.4f}, {t_lon:.4f})")
+                print(f"               Max Wave: {forecast_data['max_wave_height_m']}m | Horizon: {forecast_data['time_horizon']}")
+            else:
+                print(f"[ForecastAgent] Forecast API offline / unreachable. Falling back silently to real-time MOSDAC cache.")
+                forecast_offline = True
 
     # Determine Vessel Location & Target Destination early for spatial cross-referencing
     vessel_location = raw_agent_outputs.get("vessel_location")
+    if not vessel_location and "location_context" in raw_agent_outputs:
+        lc = raw_agent_outputs["location_context"]
+        if isinstance(lc, dict) and lc.get("name"):
+            vessel_location = lc["name"]
+        elif hasattr(lc, "location_name") and lc.location_name:
+            vessel_location = lc.location_name
     if not vessel_location and "device_telemetry" in raw_agent_outputs:
         dt = raw_agent_outputs["device_telemetry"]
-        if isinstance(dt, dict) and "latitude" in dt and "longitude" in dt:
+        if isinstance(dt, dict) and "latitude" in dt and "longitude" in dt and dt.get("latitude") is not None:
             vessel_location = f"{dt['latitude']:.4f},{dt['longitude']:.4f}"
     if not vessel_location:
-        vessel_location = "8.7642,78.1348"  # Default (Thoothukudi Departure Port)
+        for agent_k in ["WEATHER_AGENT", "OCEAN_AGENT", "DISASTER_AGENT", "GIS_AGENT", "PFZ_AGENT"]:
+            agent_data = raw_agent_outputs.get(agent_k)
+            if isinstance(agent_data, dict) and agent_data.get("location"):
+                loc_info = agent_data["location"]
+                if isinstance(loc_info, dict) and loc_info.get("latitude") is not None:
+                    vessel_location = f"{loc_info['latitude']:.4f},{loc_info['longitude']:.4f}"
+                    break
+                elif isinstance(loc_info, str):
+                    vessel_location = loc_info
+                    break
 
     # Determine PFZ or requested target destination
     target_destination = None
@@ -2436,18 +2613,19 @@ def run_decision_engine(
 
     # Resolve coordinates for cyclone track spatial cross-referencing
     gis_resolver = GisAgent()
-    orig_coords = gis_resolver.resolve_location(vessel_location)
-    orig_lat, orig_lon = (float(orig_coords["lat"]), float(orig_coords["lon"])) if orig_coords and "lat" in orig_coords else (8.7642, 78.1348)
-    route_coords = [(orig_lat, orig_lon)]
+    orig_coords = gis_resolver.resolve_location(vessel_location) if vessel_location else {"is_unknown": True, "lat": None, "lon": None}
+    orig_lat = float(orig_coords["lat"]) if (orig_coords and orig_coords.get("lat") is not None) else None
+    orig_lon = float(orig_coords["lon"]) if (orig_coords and orig_coords.get("lon") is not None) else None
+    route_coords = [(orig_lat, orig_lon)] if (orig_lat is not None and orig_lon is not None) else []
 
     if target_destination:
         dest_coords = gis_resolver.resolve_location(target_destination)
-        if dest_coords and "lat" in dest_coords:
+        if dest_coords and dest_coords.get("lat") is not None and dest_coords.get("lon") is not None:
             route_coords.append((float(dest_coords["lat"]), float(dest_coords["lon"])))
 
     gis_out = raw_agent_outputs.get("GIS_AGENT", {})
     if isinstance(gis_out, dict):
-        gis_wps = gis_out.get("safe_sea_route", {}).get("waypoints", [])
+        gis_wps = (gis_out.get("safe_sea_route") or {}).get("waypoints", [])
         for wp in gis_wps:
             if isinstance(wp, (list, tuple)) and len(wp) >= 2:
                 route_coords.append((float(wp[0]), float(wp[1])))
@@ -2570,17 +2748,16 @@ def run_decision_engine(
         "persona": p_enum.value,
         "language_code": language_code,
         "imbl_violation": risk_data.get("metrics", {}).get("imbl_violation", False),
-        "within_eez": risk_data.get("metrics", {}).get("within_eez", True),
-        "is_live_satellite": any(
-            bool(raw_agent_outputs.get(ag, {}).get("is_live_satellite", False))
-            for ag in ("OCEAN_AGENT", "WEATHER_AGENT", "DISASTER_AGENT", "PFZ_AGENT")
-            if isinstance(raw_agent_outputs.get(ag), dict)
-        ),
         "is_future_query": is_future_query,
         "forecast_active": risk_data.get("forecast_active", False),
         "forecast_offline": risk_data.get("forecast_offline", False),
         "status_label": risk_data.get("status_label", "Operational Status"),
     }
+
+    # Preserve domain agent outputs
+    for ag_key in ["WEATHER_AGENT", "OCEAN_AGENT", "DISASTER_AGENT", "GIS_AGENT", "PFZ_AGENT"]:
+        if ag_key in raw_agent_outputs:
+            final_payload[ag_key] = raw_agent_outputs[ag_key]
 
     if risk_data.get("forecast_active"):
         final_payload["forecast_max_wave_m"] = risk_data.get("forecast_max_wave_m")
@@ -2611,12 +2788,19 @@ def run_decision_engine(
     elif is_nighttime:
         # Diurnal Nighttime: Force 0 W/m² zero solar insolation
         solar_w_m2 = 0
-    elif status_str in ("SAFE", "GO", "OPERATIONAL"):
-        solar_w_m2 = random.randint(700, 950)
-    elif status_str == "EMERGENCY_SAR":
-        solar_w_m2 = random.randint(0, 150)
     else:
-        solar_w_m2 = random.randint(0, 200)
+        # Retrieve observed solar insolation from Weather Agent telemetry if present
+        w_telemetry = (raw_agent_outputs.get("WEATHER_AGENT", {}).get("telemetry") or {}) if raw_agent_outputs else {}
+        insolation_obs = w_telemetry.get("solar_insolation_wm2")
+        if insolation_obs is not None and isinstance(insolation_obs, (int, float)) and insolation_obs > 0:
+            solar_w_m2 = int(round(insolation_obs))
+        elif status_str in ("SAFE", "GO", "OPERATIONAL"):
+            # Deterministic clear-sky diurnal curve based on decimal hour (IST)
+            # Peak ~850 W/m² at solar noon (12:15 IST), 0 at dawn (06:00) and dusk (18:30)
+            h_norm = max(0.0, min(1.0, (current_hour_dec - 6.0) / 12.5))
+            solar_w_m2 = int(round(850.0 * math.sin(math.pi * h_norm)))
+        else:
+            solar_w_m2 = 0
 
     # Extract route distance in nautical miles
     route_distance_nm = 0.0

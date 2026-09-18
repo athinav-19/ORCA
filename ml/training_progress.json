@@ -1,0 +1,133 @@
+{
+  "title": "ORCA Multi-Agent ML Training Pipeline - Status Report",
+  "current_phase": "TRAINING_DISASTER_MODEL",
+  "last_updated": "2026-09-16T08:59:38.837197",
+  "models": {
+    "disaster": "TRAINED",
+    "weather": "TRAINED",
+    "pfz": "PENDING"
+  },
+  "completed_steps_count": 4,
+  "completed_steps": [
+    "catalog_generated",
+    "reports_generated",
+    "weather_model_trained",
+    "disaster_model_trained"
+  ],
+  "metrics_summary": {
+    "weather": {
+      "best_model_architecture": "LightGBM_MultiHorizon",
+      "horizons_evaluated": {
+        "6h": {
+          "persistence": {
+            "mae": 4.86,
+            "rmse": 6.26,
+            "r2": 0.306
+          },
+          "lightgbm": {
+            "mae": 3.2,
+            "rmse": 4.29,
+            "r2": 0.673,
+            "improvement_over_baseline_pct": 31.37
+          },
+          "random_forest": {
+            "mae": 3.37,
+            "rmse": 4.53,
+            "r2": 0.636
+          }
+        },
+        "12h": {
+          "persistence": {
+            "mae": 5.82,
+            "rmse": 7.26,
+            "r2": 0.066
+          },
+          "lightgbm": {
+            "mae": 3.1,
+            "rmse": 4.25,
+            "r2": 0.68,
+            "improvement_over_baseline_pct": 41.46
+          },
+          "random_forest": {
+            "mae": 3.22,
+            "rmse": 4.42,
+            "r2": 0.654
+          }
+        },
+        "24h": {
+          "persistence": {
+            "mae": 3.6,
+            "rmse": 5.01,
+            "r2": 0.554
+          },
+          "lightgbm": {
+            "mae": 3.18,
+            "rmse": 4.37,
+            "r2": 0.66,
+            "improvement_over_baseline_pct": 12.7
+          },
+          "random_forest": {
+            "mae": 3.27,
+            "rmse": 4.48,
+            "r2": 0.643
+          }
+        },
+        "48h": {
+          "persistence": {
+            "mae": 4.21,
+            "rmse": 5.81,
+            "r2": 0.4
+          },
+          "lightgbm": {
+            "mae": 3.58,
+            "rmse": 4.86,
+            "r2": 0.58,
+            "improvement_over_baseline_pct": 16.33
+          },
+          "random_forest": {
+            "mae": 3.7,
+            "rmse": 5.01,
+            "r2": 0.553
+          }
+        },
+        "72h": {
+          "persistence": {
+            "mae": 4.56,
+            "rmse": 6.24,
+            "r2": 0.306
+          },
+          "lightgbm": {
+            "mae": 3.78,
+            "rmse": 5.1,
+            "r2": 0.537,
+            "improvement_over_baseline_pct": 18.27
+          },
+          "random_forest": {
+            "mae": 3.88,
+            "rmse": 5.23,
+            "r2": 0.513
+          }
+        }
+      },
+      "average_24h_rmse": 4.37,
+      "baseline_24h_rmse": 5.01
+    },
+    "disaster": {
+      "recall": 0.9455,
+      "precision": 0.7666,
+      "f1": 0.8467,
+      "roc_auc": 0.9355,
+      "pr_auc": 0.9437,
+      "confusion_matrix": [
+        [
+          224,
+          95
+        ],
+        [
+          18,
+          312
+        ]
+      ]
+    }
+  }
+}

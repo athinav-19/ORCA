@@ -57,6 +57,8 @@ def is_file_valid_hdf5(filepath: str) -> bool:
 def is_dataset_cached(dataset_id: str, max_age_hours: float = 72.0) -> bool:
     """
     Checks if a valid, recent file for the given MOSDAC dataset exists in CACHE_DIR.
+    Accepts existing valid HDF5/NetCDF files in the cache to avoid blocking user-facing
+    requests or test suites on external network timeouts.
     """
     short_code = dataset_id.split("_")[-1]  # e.g., LST, HEM, OLR, CTP
     patterns = [
@@ -68,23 +70,25 @@ def is_dataset_cached(dataset_id: str, max_age_hours: float = 72.0) -> bool:
         matches.extend(glob.glob(pat))
 
     # Exclude incomplete downloads (.part), empty files, and corrupted files
+    now = time.time()
     valid_matches = []
     for m in matches:
         if m.endswith(".part") or not os.path.exists(m) or os.path.getsize(m) < 1024:
             continue
+        if max_age_hours and max_age_hours > 0:
+            file_age_hours = (now - os.path.getmtime(m)) / 3600.0
+            if file_age_hours > max_age_hours:
+                continue
         if is_file_valid_hdf5(m):
             valid_matches.append(m)
 
     if not valid_matches:
         return False
 
-    valid_matches.sort(key=os.path.getmtime, reverse=True)
-    latest_file = valid_matches[0]
-    file_age_seconds = time.time() - os.path.getmtime(latest_file)
-    return file_age_seconds <= (max_age_hours * 3600)
+    return True
 
 
-def ensure_latest_mosdac_cache(max_age_hours: float = 72.0, force_sync: bool = False, timeout_sec: int = 120) -> Dict[str, Any]:
+def ensure_latest_mosdac_cache(max_age_hours: float = 72.0, force_sync: bool = False, timeout_sec: int = 5) -> Dict[str, Any]:
     """
     Pre-run check: verifies that the latest MOSDAC satellite files for all
     supported datasets (LST, HEM, OLR, CTP) are present in the cache.
@@ -98,7 +102,7 @@ def ensure_latest_mosdac_cache(max_age_hours: float = 72.0, force_sync: bool = F
             missing_or_stale.append(ds)
 
     if not missing_or_stale:
-        print(f"[MOSDAC Cache OK] All {len(SUPPORTED_DATASETS)} satellite datasets verified in {CACHE_DIR} (fresh within {max_age_hours}h).")
+        print(f"[MOSDAC Cache OK] All {len(SUPPORTED_DATASETS)} satellite datasets verified in {CACHE_DIR}.")
         return {"status": "UP_TO_DATE", "synced": [], "cached_datasets": SUPPORTED_DATASETS}
 
     print(f"\n[MOSDAC Cache Notice] Missing or outdated datasets detected: {missing_or_stale}")

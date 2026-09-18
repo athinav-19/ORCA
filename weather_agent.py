@@ -50,19 +50,21 @@ class WeatherAgent:
 
     def __init__(self, cache_dir: str = "./data/mosdac_cache"):
         self.cache_dir = cache_dir
+        self.ml_models = None
+        self.ml_status = "UNAVAILABLE"
+        try:
+            from ml.model_registry import ModelRegistry
+            self.ml_models = ModelRegistry.get_model("weather")
+            self.ml_status = "LOADED" if self.ml_models is not None else "UNAVAILABLE"
+        except Exception:
+            self.ml_status = "UNAVAILABLE"
 
-    def _resolve_coordinates(self, location: str) -> tuple[float, float]:
-        if location and "," in str(location):
-            try:
-                parts = str(location).split(",")
-                return (float(parts[0].strip()), float(parts[1].strip()))
-            except (ValueError, IndexError):
-                pass
-        key = (location or "").strip().lower()
-        for city, coords in self.COASTAL_COORDS.items():
-            if city in key:
-                return coords
-        return (8.76, 78.13)
+    def _resolve_coordinates(self, location: Any) -> tuple[Optional[float], Optional[float], str]:
+        from gis_agent import GisAgent
+        sec = GisAgent().resolve_location(location)
+        if not sec.get("is_unknown") and sec.get("lat") is not None and sec.get("lon") is not None:
+            return (float(sec["lat"]), float(sec["lon"]), sec.get("name") or str(location))
+        return (None, None, str(location) if location else "Location Required")
 
     def load_mosdac_weather_data(self, target_lat: float, target_lon: float) -> Optional[Dict[str, Any]]:
         """
@@ -246,61 +248,77 @@ class WeatherAgent:
             "source": f"ISRO MOSDAC Multi-Satellite Observation ({primary_granule})",
         }
 
-    def simulate_mosdac_feed(self, location: str, time_frame: str) -> Dict[str, Any]:
-        """
-        Deterministic telemetry model calibrated strictly to ISRO INSAT-3DR satellite
-        meteorological observations over the Indian coastal zone.
-        """
-        lat, lon = self._resolve_coordinates(location)
-        seed_val = int((lat * 100 + lon * 100) % 1000)
-        rng = random.Random(seed_val)
-
-        base_wind = 22.0 + (seed_val % 16)
-        wind_speed_kmh = round(base_wind + rng.uniform(-3.0, 5.0), 1)
-        gust_speed_kmh = round(wind_speed_kmh * 1.32, 1)
-
-        directions = ["NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
-        wind_direction = directions[seed_val % len(directions)]
-        rainfall_mmh = round(max(0.0, (seed_val % 10) - 5 + rng.uniform(0.0, 4.0)), 1)
-        visibility_km = round(max(2.0, 10.0 - (rainfall_mmh * 0.45) + rng.uniform(-0.5, 0.5)), 1)
-        pressure_hpa = round(1011.5 + rng.uniform(-4.0, 3.0), 1)
-        insolation_wm2 = round(800.0 + rng.uniform(-30.0, 50.0), 1)
-        solar_daily_kwh = round((insolation_wm2 / 1000.0) * 6.5, 2)
-
-        return {
-            "wind_speed_kmh": wind_speed_kmh,
-            "gust_speed_kmh": gust_speed_kmh,
-            "wind_direction": wind_direction,
-            "rainfall_mmh": rainfall_mmh,
-            "visibility_km": visibility_km,
-            "pressure_hpa": pressure_hpa,
-            "surface_temp_c": 28.0,
-            "solar_insolation_wm2": insolation_wm2,
-            "solar_daily_kwh_m2": solar_daily_kwh,
-            "satellite_granule": "INSAT-3DR_MOSDAC_V01R00",
-            "source": "ISRO MOSDAC Satellite Ingestion (INSAT-3DR Model)",
-        }
 
     def execute_task(
         self,
-        location: str,
-        time_frame: str,
-        task_instructions: str,
-        expected_format: str,
-        persona: str,
+        location: Any,
+        time_frame: str = "today",
+        task_instructions: str = "",
+        expected_format: str = "TEXT_SUMMARY",
+        persona: str = "FISHERMAN",
     ) -> Dict[str, Any]:
-        loc_str = location.strip() if location else "Coastal Region"
+        lat, lon, loc_name = self._resolve_coordinates(location)
+        loc_str = str(loc_name)
         time_str = time_frame.strip() if time_frame else "Today"
         format_upper = expected_format.strip().upper() if expected_format else "TEXT_SUMMARY"
 
-        lat, lon = self._resolve_coordinates(loc_str)
+        loc_dict = {
+            "name": loc_name,
+            "latitude": lat,
+            "longitude": lon,
+        }
 
-        is_live_satellite = True
+        if lat is None or lon is None:
+            return {
+                "agent": "WEATHER_AGENT",
+                "location": loc_dict,
+                "location_name": loc_str,
+                "time_frame": time_str,
+                "format": format_upper,
+                "status": "LOCATION_REQUIRED",
+                "error": "LOCATION_REQUIRED",
+                "summary": f"Location '{loc_name}' is required to fetch weather satellite data.",
+                "advisory": f"Please provide a recognized coastal port or valid GPS coordinates for weather analysis.",
+                "telemetry": None,
+                "safety_assessment": {
+                    "is_safe": False,
+                    "status": "LOCATION_REQUIRED",
+                    "thresholds_exceeded": ["Geographic location required"],
+                },
+            }
+
         telemetry = self.load_mosdac_weather_data(lat, lon)
         if telemetry is None:
-            telemetry = self.simulate_mosdac_feed(loc_str, time_str)
-            is_live_satellite = False
-        telemetry["is_live_satellite"] = is_live_satellite
+            return {
+                "agent": "WEATHER_AGENT",
+                "location": loc_dict,
+                "location_name": loc_str,
+                "time_frame": time_str,
+                "format": format_upper,
+                "status": "DATA_UNAVAILABLE",
+                "error": "DATA_UNAVAILABLE",
+                "summary": (
+                    f"Weather telemetry for {loc_str} is currently unavailable. "
+                    "Real-time ISRO INSAT-3DR / Oceansat-3 satellite data is pending synchronization."
+                ),
+                "advisory": (
+                    "Live satellite meteorological data is not currently cached for this coordinate. "
+                    "Check local IMD marine forecasts before departure."
+                ),
+                "telemetry": None,
+                "safety_assessment": {
+                    "is_safe": False,
+                    "status": "DATA_UNAVAILABLE",
+                    "thresholds_exceeded": ["Real-time satellite data pending synchronization"],
+                },
+                "metadata": {
+                    "source": "DATA_UNAVAILABLE",
+                    "is_live_satellite": False,
+                    "cache_status": "PENDING_SYNC_ISRO_INSAT_3DR",
+                },
+            }
+        telemetry["is_live_satellite"] = True
+        is_live_satellite = True
 
         wind = telemetry["wind_speed_kmh"]
         gust = telemetry["gust_speed_kmh"]
@@ -332,17 +350,62 @@ class WeatherAgent:
                 f"Low visibility ({vis} km) below maritime safety minimum ({self.MIN_VISIBILITY_KM} km)"
             )
 
+        # Real-Time ML Weather Multi-Horizon Forecasting
+        try:
+            from ml.inference.weather_infer import predict_marine_weather_forecast
+            ml_forecast = predict_marine_weather_forecast(
+                latitude=lat,
+                longitude=lon,
+                current_wind_kmh=wind,
+                current_wind_dir_deg=telemetry.get("wind_direction_deg", 220.0),
+                current_pressure_hpa=telemetry.get("pressure_hpa", 1010.5),
+                current_rainfall_mmh=rain,
+                current_wave_height_m=telemetry.get("wave_height_m", 1.2),
+            )
+        except Exception as e:
+            ml_forecast = {
+                "status": "UNAVAILABLE",
+                "model_available": False,
+                "message": f"Prediction unavailable because required data/model is unavailable: {e}",
+                "trend_assessment": "NOMINAL",
+                "forecast_table": [],
+                "error": str(e),
+            }
+
+        # Check if 24h forecast exceeds safe operating thresholds
+        forecast_wind_24h = wind
+        if ml_forecast.get("forecast_table") and len(ml_forecast["forecast_table"]) >= 3:
+            forecast_wind_24h = ml_forecast["forecast_table"][2].get("wind_speed_kmh", wind)
+            if forecast_wind_24h > self.WIND_UNSAFE_KMH:
+                safety_warnings.append(
+                    f"24h ML Forecast warns of rising winds to {forecast_wind_24h} km/h (exceeds safe limit {self.WIND_UNSAFE_KMH} km/h)"
+                )
+
         status = "SAFE" if is_safe else "UNSAFE_FOR_SMALL_CRAFT"
+
+        provenance = {
+            "satellite_source": telemetry.get("source", "ISRO MOSDAC INSAT-3DR"),
+            "observation_type": "OBSERVED_NRT",
+            "forecast_type": "ML_PREDICTION",
+            "forecast_horizons": ["6h", "12h", "24h", "48h", "72h"],
+        }
 
         summary_lines = [
             f"ISRO MOSDAC Marine Weather Advisory for {loc_str} [{time_str}]:",
-            f"• Satellite Source: {telemetry.get('source', 'ISRO MOSDAC INSAT-3DR')}",
+            f"• Satellite Source: {telemetry.get('source', 'ISRO MOSDAC INSAT-3DR')} [OBSERVED_NRT]",
             f"• Wind Conditions: {wind} km/h sustained from {direction}, gusting up to {gust} km/h.",
             f"• Precipitation & Visibility: {rain} mm/h rainfall rate, horizontal visibility {vis} km.",
             f"• Atmospheric Pressure: {telemetry['pressure_hpa']} hPa.",
             f"• Solar Energy Flux: {telemetry.get('solar_insolation_wm2', 820.0)} W/m² (Est. Daily Yield: {telemetry.get('solar_daily_kwh_m2', 5.4)} kWh/m²).",
-            f"• Operational Status: {'GO - Favorable weather for maritime operations' if is_safe else 'CAUTION / NO-GO - Hazardous conditions detected'}.",
         ]
+        if ml_forecast.get("forecast_table"):
+            ft = ml_forecast["forecast_table"]
+            summary_lines.append(
+                f"• ML Multi-Horizon Forecast: 6h={ft[0]['wind_speed_kmh']}km/h | 12h={ft[1]['wind_speed_kmh']}km/h | 24h={ft[2]['wind_speed_kmh']}km/h | 48h={ft[3]['wind_speed_kmh']}km/h ({ml_forecast.get('trend_assessment', 'STABLE')})"
+            )
+        summary_lines.append(
+            f"• Operational Status: {'GO - Favorable weather for maritime operations' if is_safe else 'CAUTION / NO-GO - Hazardous conditions detected'}."
+        )
         if telemetry.get("fog_cover_fraction", 0.0) > 0.3:
             summary_lines.append(f"• Maritime Fog Warning: Active sea fog detected ({int(telemetry['fog_cover_fraction'] * 100)}% cover). Caution in shipping lanes.")
         if safety_warnings:
@@ -353,23 +416,30 @@ class WeatherAgent:
         if format_upper == "BINARY_ADVISORY":
             return {
                 "agent": "WEATHER_AGENT",
-                "location": loc_str,
+                "location": loc_dict,
+                "location_name": loc_str,
                 "time_frame": time_str,
                 "format": "BINARY_ADVISORY",
                 "status": "SAFE" if is_safe else "WARNING",
                 "is_live_satellite": is_live_satellite,
                 "advisory": text_summary,
                 "telemetry": telemetry,
+                "ml_forecast": ml_forecast,
+                "data_provenance": provenance,
             }
 
         return {
             "agent": "WEATHER_AGENT",
-            "location": loc_str,
+            "location": loc_dict,
+            "location_name": loc_str,
             "time_frame": time_str,
             "format": "TEXT_SUMMARY",
+            "status": status,
             "is_live_satellite": is_live_satellite,
             "summary": text_summary,
             "telemetry": telemetry,
+            "ml_forecast": ml_forecast,
+            "data_provenance": provenance,
             "safety_assessment": {
                 "is_safe": is_safe,
                 "status": status,
