@@ -2208,12 +2208,24 @@ class ReasoningAgent:
         cyc_intel = risk_data.get("cyclone_intelligence") or {}
         has_cyc_col = bool(cyc_intel.get("route_collision"))
 
+        # Determine canonical intent category and stakeholder context
         q_lower = str(user_query_text or "").lower()
         intent_cat = (aggregated_data.get("analyzed_intent") or "").upper()
-        is_cyclone_query = (intent_cat == "DISASTER") or any(k in q_lower for k in ["cyclone", "storm", "hurricane", "typhoon", "depression", "tsunami", "surge", "radar", "hazard", "gale"])
-        is_weather_query = (intent_cat == "WEATHER") or any(k in q_lower for k in ["weather", "wind", "rain", "temperature", "forecast", "cloud", "gust", "pressure", "wave", "swell", "sea state"])
-        is_fishing_query = (intent_cat == "FISHING") or any(k in q_lower for k in ["fish", "fishing", "pfz", "catch", "tuna", "mackerel", "sardine", "seerfish", "shoal", "yield"])
-        is_route_query = (intent_cat == "ROUTE") or any(k in q_lower for k in ["route", "passage", "sail from", "navigate", "navigation", "sri lanka", "colombo", "waypoint"]) or ("from " in q_lower and " to " in q_lower)
+
+        # Deterministic risk mapping to standardized levels (LOW, MODERATE, HIGH, CRITICAL)
+        if status in ("DANGER", "CRITICAL", "NO-GO") or risk_score >= 65.0:
+            risk_level = "CRITICAL" if (risk_score >= 80.0 or status == "CRITICAL") else "HIGH"
+        elif status in ("WARNING", "CAUTION") or risk_score >= 35.0:
+            risk_level = "MODERATE"
+        else:
+            risk_level = "LOW"
+
+        is_cyclone_query = (intent_cat in ("CYCLONE", "DISASTER")) or any(k in q_lower for k in ["cyclone", "storm", "hurricane", "typhoon", "depression", "tsunami", "surge", "radar", "hazard", "gale"])
+        is_weather_query = (intent_cat == "WEATHER") or any(k in q_lower for k in ["weather", "wind", "rain", "temperature", "forecast", "cloud", "gust", "pressure", "barometer"])
+        is_waves_query = (intent_cat in ("WAVES", "CURRENT", "OCEAN_CONDITIONS")) or any(k in q_lower for k in ["wave", "waves", "swell", "sea state", "rough sea", "calm sea", "current"])
+        is_fishing_query = (intent_cat in ("FISHING", "PFZ")) or any(k in q_lower for k in ["fish", "fishing", "pfz", "catch", "tuna", "mackerel", "sardine", "seerfish", "shoal", "yield"])
+        is_route_query = (intent_cat in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")) or any(k in q_lower for k in ["route", "passage", "sail from", "navigate", "navigation", "sri lanka", "colombo", "waypoint"]) or ("from " in q_lower and " to " in q_lower)
+        is_boundary_query = (intent_cat in ("MARITIME_BOUNDARY", "EEZ")) or any(k in q_lower for k in ["eez", "boundary", "border", "imbl", "jurisdiction"])
 
         w_ht = float(metrics.get("wave_height_m") or metrics.get("wave_height") or 1.2)
         w_spd = float(metrics.get("wind_speed_kmph") or metrics.get("wind_speed") or 14.0)
@@ -2224,219 +2236,216 @@ class ReasoningAgent:
         vis = float(metrics.get("visibility_km", 10.0))
         temp = float(metrics.get("surface_temp_c", 27.5))
 
-        if is_cyclone_query:
-            if status in ("DANGER", "WARNING") or metrics.get("is_cyclone_active") or metrics.get("hazard_active") or has_cyc_col:
-                status_tag = "STATUS: NO-GO." if (status == "DANGER" or has_cyc_col) else "STATUS: CAUTION."
-                c_name = cyc_intel.get("active_storms", "Tropical Cyclonic Storm")
-                c_desc = metrics.get("hazard_description") or f"Active cyclonic storm alert ({c_name})"
-                explanation = (
-                    f"{status_tag} Tropical Cyclone Warning: {c_desc}. "
-                    f"Elevated wind speeds reaching {w_spd:.1f} km/h with gusts to {g_spd:.1f} km/h and wave heights at {w_ht:.1f} meters. "
-                    f"IMMEDIATE ACTION: Cease offshore operations immediately, return to port, and monitor VHF Channel 16 for disaster management bulletins."
-                )
+        if is_weather_query and not is_route_query and not is_fishing_query and not is_cyclone_query:
+            if forecast_active:
+                f_wave_val = forecast_max_wave if forecast_max_wave is not None else wave
+                title = f"{departure_harbor} — Marine Forecast ({temporal_label})"
+                summary = f"Forward-looking marine forecast for {temporal_label} predicts maximum wave heights of {f_wave_val:.2f} meters. This advisory is a prediction for the requested {forecast_horizon} horizon."
+                cond_lines = [
+                    f"Forecast Horizon: {forecast_horizon}",
+                    f"Predicted Wave Height: {f_wave_val:.2f} m",
+                    f"Surface Wind: {w_spd:.1f} km/h {w_dir}",
+                ]
+                recommendation = "Plan voyage according to numerical predictions and recheck before departure." if risk_level == "LOW" else "Postpone voyage until wave heights subside."
+                source_line = f"Open-Meteo Numerical Marine Model\nClassification: FORECAST\nHorizon: {forecast_horizon}"
             else:
-                status_tag = "STATUS: GO."
-                explanation = (
-                    f"STATUS: GO. No tropical cyclone or severe storm is currently detected in your maritime operating sector ({departure_harbor}). "
-                    f"ISRO MOSDAC scatterometer and radar telemetry confirm clear conditions. Sustained wind speed is {w_spd:.1f} km/h ({w_dir}) and wave height is {w_ht:.1f} meters. "
-                    f"Maritime conditions are safe for routine operations."
-                )
-            rec_coords = ""
-
-        elif is_weather_query:
-            if status in ("DANGER", "WARNING"):
-                status_tag = "STATUS: CAUTION." if status == "WARNING" else "STATUS: NO-GO."
-                explanation = (
-                    f"{status_tag} Coastal weather advisory: Marginal or adverse sea state observed. "
-                    f"Sustained wind speed is {w_spd:.1f} km/h from {w_dir} with gusts up to {g_spd:.1f} km/h. "
-                    f"Wave heights reach {w_ht:.1f} meters. Precipitation rate: {rain:.1f} mm/h. Atmospheric pressure: {press:.0f} hPa. "
-                    f"Exercise heightened vigilance and monitor weather updates."
-                )
-            else:
-                status_tag = "STATUS: CONDITIONAL." if has_temporal else "STATUS: GO."
-                temporal_prefix = temporal_boundary if has_temporal else ""
-                explanation = (
-                    f"{status_tag} {temporal_prefix}Coastal weather advisory for your operating sector: Favorable maritime conditions observed. "
-                    f"Sustained wind speed is {w_spd:.1f} km/h from {w_dir} with gusts up to {g_spd:.1f} km/h. "
-                    f"Sea state shows wave heights of {w_ht:.1f} meters with gentle swells. "
-                    f"Atmospheric pressure is {press:.0f} hPa, sea surface temperature {temp:.1f}°C, and visibility is {vis:.1f} km with {rain:.1f} mm/h rainfall. "
-                    f"Conditions are favorable for maritime operations."
-                )
-            rec_coords = ""
-
-        elif is_fishing_query:
-            if imbl_violation:
-                status_tag = "STATUS: NO-GO."
-                explanation = (
-                    f"{status_tag} Boundary violation detected: Target fishing grounds cross the International Maritime Boundary Line (IMBL) into Sri Lankan waters. "
-                    f"Crossing the IMBL is strictly prohibited. Plotted alternative PFZ grounds strictly within sovereign Indian EEZ waters."
-                )
-            else:
-                pfz_agent = aggregated_data.get("PFZ_AGENT", {})
-                features = pfz_agent.get("geojson", {}).get("features", []) if isinstance(pfz_agent, dict) else []
-                if features:
-                    props = features[0].get("properties", {})
-                    t_lat = props.get("centroid_lat")
-                    t_lon = props.get("centroid_lon")
-                    score = props.get("suitability_score", 92)
-                    catch = ", ".join(props.get("likely_catch", ["Yellowfin Tuna", "Mackerel", "Sardine"]))
-                    coord_str = f"at Latitude {t_lat:.4f}° N, Longitude {t_lon:.4f}° E" if (t_lat is not None and t_lon is not None) else ""
-                    explanation = (
-                        f"STATUS: GO. Optimal Potential Fishing Zone (PFZ) identified {coord_str} off {departure_harbor}. "
-                        f"Chlorophyll-a front concentration and thermal gradients indicate high pelagic fish aggregation (Suitability: {score}/100) with favorable catch probability for {catch}. "
-                        f"Sea surface temperature is {temp:.1f}°C with safe wave heights of {w_ht:.1f} meters. "
-                        f"Refer to plotted PFZ waypoints on your mobile map interface."
-                    )
-                    rec_coords = f"{t_lat:.4f},{t_lon:.4f}" if (t_lat is not None and t_lon is not None) else ""
+                title = f"{departure_harbor} — Current Conditions"
+                if risk_level in ("HIGH", "CRITICAL"):
+                    summary = f"Adverse weather conditions detected in {departure_harbor} with gale winds of {w_spd:.1f} km/h and wave heights reaching {w_ht:.1f} m."
+                    recommendation = "Exercise heightened caution. Small craft should remain in sheltered harbor."
+                elif risk_level == "MODERATE":
+                    summary = f"Marginal weather conditions observed in {departure_harbor} with winds of {w_spd:.1f} km/h and wave heights of {w_ht:.1f} m."
+                    recommendation = "Monitor weather radar and VHF Channel 16 for changing conditions."
                 else:
-                    if wp1_coord and "," in wp1_coord:
-                        p_parts = wp1_coord.split(",")
-                        t_lat = float(p_parts[0])
-                        t_lon = float(p_parts[1])
-                    elif rec_coords and "," in rec_coords:
-                        p_parts = rec_coords.split(",")
-                        t_lat = float(p_parts[0])
-                        t_lon = float(p_parts[1])
-                    else:
-                        t_lat, t_lon = None, None
-                    coord_str = f"at Lat {t_lat:.4f}° N, Lon {t_lon:.4f}° E" if t_lat is not None else ""
-                    explanation = (
-                        f"STATUS: GO. High-yield Potential Fishing Zone (PFZ) located {coord_str} off {departure_harbor}. "
-                        f"Favorable SST ({temp:.1f}°C) and chlorophyll fronts indicate high pelagic fish aggregation (Suitability: 85/100). "
-                        f"Sea state is safe with wave heights of {w_ht:.1f} meters."
-                    )
-                    rec_coords = f"{t_lat:.4f},{t_lon:.4f}" if t_lat is not None else ""
+                    temporal_prefix = f"Current satellite observation as of {dataset_ts}. " if has_temporal else ""
+                    summary = f"{temporal_prefix}Conditions currently appear suitable for routine maritime operations in {departure_harbor}."
+                    recommendation = "Normal operations are reasonable. Continue monitoring changing wind and wave conditions."
 
-        elif imbl_violation:
-            if p_enum == StakeholderPersona.MARITIME_AUTHORITY:
-                status_tag = "STATUS: CAUTION."
-                core_hazard = "Jurisdictional boundary assessment: Active patrol vector along India-Sri Lanka IMBL sovereign boundary sector."
-                legal_notice = "OPERATIONAL PROTOCOL: Indian Coast Guard and naval units maintain active maritime domain awareness. Comply with sovereign patrol rules of engagement and AIS broadcast integrity."
-                action_dir = f"IMMEDIATE ACTION: Maintain tactical perimeter patrol across the {dist_nm:.1f} nautical mile corridor and observe plotted defense waypoints on your mobile map interface."
-                explanation = f"{status_tag} {inland_prefix}{core_hazard} {legal_notice} {action_dir}"
+                cond_lines = [
+                    f"Wind: {w_spd:.1f} km/h {w_dir}",
+                    f"Gusts: {g_spd:.1f} km/h",
+                    f"Waves: {w_ht:.1f} m",
+                    f"Sea Surface Temperature: {temp:.1f} °C",
+                    f"Pressure: {press:.0f} hPa",
+                    f"Rainfall: {rain:.1f} mm/h",
+                ]
+                source_line = f"ISRO MOSDAC / Copernicus Marine Service\nObservation: {dataset_ts}"
+            rec_coords = ""
+
+        elif is_cyclone_query and not is_route_query and not is_fishing_query:
+            if status in ("DANGER", "WARNING") or metrics.get("is_cyclone_active") or metrics.get("hazard_active") or has_cyc_col:
+                c_name = cyc_intel.get("active_storms", "Tropical Cyclonic Storm")
+                title = f"{departure_harbor} — Cyclone Warning ({c_name})"
+                summary = f"Active tropical cyclone {c_name} detected with sustained wind speeds of {w_spd:.1f} km/h and storm gusts to {g_spd:.1f} km/h."
+                cond_lines = [
+                    "Cyclone detected: YES",
+                    f"Active Storm: {c_name}",
+                    f"Wind Speed: {w_spd:.1f} km/h {w_dir}",
+                    f"Gusts: {g_spd:.1f} km/h",
+                    f"Wave Height: {w_ht:.1f} m",
+                    f"Pressure: {press:.0f} hPa",
+                ]
+                recommendation = "Cease offshore operations immediately, return to port, and monitor VHF Channel 16 for disaster management bulletins."
+                source_line = f"IMD / ISRO MOSDAC Cyclone Warning Division\nObservation: {dataset_ts}"
             else:
-                status_tag = "STATUS: NO-GO."
-                core_hazard = "Boundary violation detected: Proposed route targets foreign waters across the maritime border."
-                legal_notice = "LEGAL NOTICE: Navigating across the International Maritime Boundary Line (IMBL) into Sri Lankan waters is illegal and strictly prohibited under international maritime law and Indian Coast Guard regulations."
-                action_dir = f"IMMEDIATE ACTION: Turn back immediately, navigate {dist_nm:.1f} nautical miles into sovereign Indian waters, and refer to the plotted safe waypoints on your mobile map interface."
-                explanation = f"{status_tag} {inland_prefix}{core_hazard} {legal_notice} {action_dir}"
-        elif has_cyc_col:
-            c_name = cyc_intel.get("active_storms", "Tropical Cyclonic Storm")
-            c_traj = cyc_intel.get("trajectory_path", "projected track")
-            c_clr = cyc_intel.get("clearance_distance_nm")
-            clr_str = f"{c_clr:.1f} nautical miles" if c_clr is not None else "less than 200 nautical miles"
-            status_tag = "STATUS: NO-GO."
-            core_hazard = (
-                f"Severe Tropical Cyclone Alert ({c_name}): Vessel route intersects forecasted storm path "
-                f"with only {clr_str} clearance (mandatory safe buffer: 200 nautical miles). "
-                f"Storm trajectory: {c_traj}. Gale-force winds and violent storm surge expected."
-            )
-            action_dir = (
-                f"IMMEDIATE ACTION: Cease navigation immediately, initiate mandatory emergency evacuation to nearest "
-                f"sheltered breakwater harbor ({dist_nm:.1f} nautical miles), and follow plotted emergency evacuation waypoints on your mobile map interface."
-            )
-            explanation = f"{status_tag} {inland_prefix}{core_hazard}{target_addon} {action_dir}"
-        elif forecast_active:
-            f_wave_val = forecast_max_wave if forecast_max_wave is not None else wave
-            status_tag = f"STATUS: {'NO-GO' if status == 'DANGER' else ('CAUTION' if status == 'WARNING' else 'GO')}."
-            forecast_statement = (
-                f"Forward-looking marine forecast for {temporal_label} predicts maximum wave heights of {f_wave_val:.2f} meters. "
-                f"This advisory is a predictive forecast for the requested {forecast_horizon} time horizon based on Open-Meteo numerical marine weather prediction models. "
-            )
-            if status == "DANGER":
-                core_hazard = f"Hazardous forecasted wave heights of {f_wave_val:.2f} meters exceeding small craft safety limits."
-                action_dir = f"IMMEDIATE ACTION: Cease operations immediately, navigate {dist_nm:.1f} nautical miles inshore toward sheltered coastal waters, and view plotted safe waypoints on your mobile map interface."
-            elif status == "WARNING":
-                core_hazard = f"Elevated forecasted sea state with wave heights near {f_wave_val:.2f} meters requiring heightened maritime caution."
-                action_dir = f"IMMEDIATE ACTION: Proceed with extreme care, navigate {dist_nm:.1f} nautical miles toward sheltered coastal waters, monitor VHF Channel 16, and check plotted waypoints on your mobile map interface."
+                title = f"{departure_harbor} — Cyclone Status"
+                summary = f"No active tropical cyclone or severe storm is currently detected in {departure_harbor} based on the latest available data."
+                cond_lines = [
+                    "Cyclone detected: NO",
+                    f"Wind Speed: {w_spd:.1f} km/h {w_dir}",
+                    f"Gusts: {g_spd:.1f} km/h",
+                    f"Pressure: {press:.0f} hPa",
+                ]
+                recommendation = "No cyclone-related restriction is indicated by the available data. Continue monitoring official IMD/INCOIS advisories."
+                source_line = f"ISRO MOSDAC / IMD Telemetry\nObservation: {dataset_ts}"
+            rec_coords = ""
+
+        elif is_waves_query and not is_route_query and not is_fishing_query:
+            title = f"{departure_harbor} — Sea State & Wave Conditions"
+            summary = f"Sea state evaluated off {departure_harbor} with significant wave height at {w_ht:.1f} m and surface winds of {w_spd:.1f} km/h."
+            cond_lines = [
+                f"Significant Wave Height: {w_ht:.1f} m",
+                f"Swell Direction: {w_dir}",
+                f"Surface Wind: {w_spd:.1f} km/h",
+                f"Sea Surface Temperature: {temp:.1f} °C",
+            ]
+            recommendation = "Sea conditions are safe for transit. Observe standard small craft safety protocols." if risk_level == "LOW" else "Elevated wave heights; navigate with heightened caution."
+            source_line = f"SARAL-AltiKa / ISRO MOSDAC\nObservation: {dataset_ts}"
+            rec_coords = ""
+
+        elif is_fishing_query and not is_route_query:
+            title = f"{departure_harbor} — Potential Fishing Zone (PFZ)"
+            pfz_agent = aggregated_data.get("PFZ_AGENT", {})
+            pfz_status = pfz_agent.get("status") if isinstance(pfz_agent, dict) else ""
+            features = pfz_agent.get("geojson", {}).get("features", []) if isinstance(pfz_agent, dict) else []
+
+            if pfz_status == "DATA_UNAVAILABLE" or not features:
+                summary = "PFZ prediction unavailable. Required environmental data is currently unavailable. No PFZ location will be inferred or fabricated."
+                cond_lines = [
+                    "PFZ Suitability: DATA_UNAVAILABLE",
+                    "SST Fronts: DATA_UNAVAILABLE",
+                    "Chlorophyll-a: DATA_UNAVAILABLE",
+                ]
+                recommendation = "Consult official INCOIS daily PFZ advisories before departure."
+                source_line = f"INCOIS / ISRO Oceansat-3\nStatus: DATA_UNAVAILABLE"
+                rec_coords = ""
+            elif imbl_violation:
+                summary = "Boundary restriction active: Proposed fishing grounds cross the International Maritime Boundary Line into Sri Lankan waters."
+                cond_lines = [
+                    "PFZ Grounds: Restricted (Foreign Waters)",
+                    "IMBL Clearance: Violated",
+                    f"SST: {temp:.1f} °C",
+                ]
+                recommendation = "Turn back immediately. Stay strictly within sovereign Indian EEZ waters."
+                source_line = f"GIS UNCLOS Maritime Boundary & INCOIS\nObservation: {dataset_ts}"
+                rec_coords = ""
             else:
-                core_hazard = f"Favorable forecasted sea state with wave heights remaining safe below 1.8 meters (peak {f_wave_val:.2f} m)."
-                action_dir = f"IMMEDIATE ACTION: Proceed along your {dist_nm:.1f} nautical mile passage following standard safety protocols, and refer to plotted waypoints on your mobile map interface."
-            explanation = f"{status_tag} {inland_prefix}{forecast_statement}{core_hazard}{target_addon} {action_dir}"
-        elif p_enum == StakeholderPersona.RESEARCHER:
-            chl_val = metrics.get("chlorophyll_mg_m3", 0.58)
-            sst_val = metrics.get("sst_c", 27.5)
-            swh_val = metrics.get("wave_height_m", 1.45)
-            solar_val = metrics.get("solar_insolation_wm2", 840.0)
-            status_tag = f"STATUS: {'NO-GO' if status == 'DANGER' else ('CAUTION' if status == 'WARNING' else ('CONDITIONAL' if has_temporal else 'GO'))}."
-            core_hazard = (
-                f"Oceanographic Earth observation telemetry: Chlorophyll-a front concentration is {chl_val:.2f} mg/m³, "
-                f"SST is {sst_val:.1f}°C, significant wave height is {swh_val:.2f} meters, and solar insolation is {solar_val:.1f} W/m²."
-            )
-            action_dir = f"IMMEDIATE ACTION: Execute oceanographic transect operations covering {dist_nm:.1f} nautical miles following the plotted waypoints on your mobile map interface."
-            temporal_clause = temporal_boundary if (has_temporal and status not in ("DANGER", "WARNING")) else ""
-            explanation = f"{status_tag} {inland_prefix}{temporal_clause}{core_hazard}{target_addon} {action_dir}"
-        elif p_enum == StakeholderPersona.MARITIME_AUTHORITY:
-            border_dist = metrics.get("distance_to_border_nm", 32.5)
-            sloc_info = metrics.get("sloc_status", "Clearance Verified")
-            status_tag = f"STATUS: {'NO-GO' if status == 'DANGER' else ('CAUTION' if status == 'WARNING' else ('CONDITIONAL' if has_temporal else 'GO'))}."
-            core_hazard = (
-                f"Maritime security and border surveillance report: India EEZ perimeter secure with {border_dist:.1f} NM border clearance. "
-                f"SLOC shipping lane status: {sloc_info}. "
-                f"{'; '.join(threats) if threats else 'Normal surveillance conditions.'}"
-            )
-            action_dir = f"IMMEDIATE ACTION: Broadcast fleet advisory directives, maintain coastal security watch across {dist_nm:.1f} nautical miles, and inspect plotted patrol waypoints on your mobile map interface."
-            temporal_clause = temporal_boundary if (has_temporal and status not in ("DANGER", "WARNING")) else ""
-            explanation = f"{status_tag} {inland_prefix}{temporal_clause}{core_hazard}{target_addon} {action_dir}"
-        elif p_enum == StakeholderPersona.DISASTER_MANAGEMENT:
-            status_tag = f"STATUS: {'NO-GO' if status == 'DANGER' else ('CAUTION' if status == 'WARNING' else ('CONDITIONAL' if has_temporal else 'GO'))}."
-            if metrics.get("is_cyclone_active") or "cyclone" in (metrics.get("hazard_description") or "").lower():
-                core_hazard = f"Critical disaster incident: Cyclone track active with gale-force winds and life-safety storm surge threats."
-                action_dir = f"IMMEDIATE ACTION: Activate coastal evacuation corridors across {dist_nm:.1f} nautical miles toward designated emergency breakwater shelters, and monitor plotted emergency points on your mobile map interface."
-            elif metrics.get("hazard_active"):
-                core_hazard = f"Coastal hazard advisory: {metrics.get('hazard_description') or 'Severe meteorological hazard active'}."
-                action_dir = f"IMMEDIATE ACTION: Maintain heightened disaster response readiness and review coastal shelter sectors on your mobile map interface."
-            else:
-                core_hazard = f"Coastal disaster monitoring: Sea state stable with wave heights at {metrics.get('wave_height_m', 1.2):.2f} meters. No active cyclonic threat detected."
-                action_dir = f"IMMEDIATE ACTION: Maintain routine disaster surveillance protocols and observe coastal monitoring sectors on your mobile map interface."
-            temporal_clause = temporal_boundary if (has_temporal and status not in ("DANGER", "WARNING")) else ""
-            explanation = f"{status_tag} {inland_prefix}{temporal_clause}{core_hazard}{target_addon} {action_dir}"
-        elif p_enum == StakeholderPersona.MARITIME_OPERATOR:
-            status_tag = f"STATUS: {'NO-GO' if status == 'DANGER' else ('CAUTION' if status == 'WARNING' else ('CONDITIONAL' if has_temporal else 'GO'))}."
-            vis = metrics.get("visibility_km", 10.0)
-            lane_name = metrics.get("shipping_lane_name", "Cape Comorin SLOC Fairway")
-            core_hazard = (
-                f"Commercial shipping navigation update: Visibility is {vis:.1f} km along {lane_name}. "
-                f"Sustained wind speed is {metrics.get('wind_speed_kmph', 15.0):.1f} km/h and wave height is {metrics.get('wave_height_m', 1.2):.2f} meters."
-            )
-            action_dir = f"IMMEDIATE ACTION: Maintain navigation along designated deep-draft Traffic Separation Scheme corridor across {dist_nm:.1f} nautical miles, and verify waypoints on your mobile map interface."
-            temporal_clause = temporal_boundary if (has_temporal and status not in ("DANGER", "WARNING")) else ""
-            explanation = f"{status_tag} {inland_prefix}{temporal_clause}{core_hazard}{target_addon} {action_dir}"
+                props = features[0].get("properties", {})
+                t_lat = props.get("centroid_lat")
+                t_lon = props.get("centroid_lon")
+                score = props.get("suitability_score", 88)
+                catch = ", ".join(props.get("likely_catch", ["Yellowfin Tuna", "Mackerel", "Sardine"]))
+                coord_str = f"at Latitude {t_lat:.4f}° N, Longitude {t_lon:.4f}° E" if (t_lat is not None and t_lon is not None) else f"off {departure_harbor}"
+
+                summary = f"Optimal Potential Fishing Zone identified {coord_str} off {departure_harbor} with favorable thermal-chlorophyll gradients."
+                cond_lines = [
+                    f"Location: {coord_str}",
+                    f"PFZ Suitability: {score}/100",
+                    f"Likely Catch: {catch}",
+                    f"Sea Surface Temperature: {temp:.1f} °C",
+                    f"Wave Height: {w_ht:.1f} m",
+                ]
+                recommendation = "Follow plotted PFZ waypoints within sovereign Indian EEZ. Note: PFZ suitability reflects habitat alignment and does not guarantee commercial catch."
+                source_line = f"INCOIS / ISRO Oceansat-3 (Rule Emulation)\nObservation: {dataset_ts}"
+                rec_coords = f"{t_lat:.4f},{t_lon:.4f}" if (t_lat is not None and t_lon is not None) else ""
+
         elif is_route_query:
-            if status == "DANGER":
-                status_tag = "STATUS: NO-GO."
-                explanation = f"{status_tag} {inland_prefix}Severe marine hazards detected along the requested transit corridor. Transit held for safety."
-            elif status == "WARNING":
-                status_tag = "STATUS: CAUTION."
-                explanation = f"{status_tag} {inland_prefix}Elevated sea state along the corridor ({w_ht:.1f}m waves). Proceed with heightened navigational vigilance."
+            dest_name = (
+                (aggregated_data.get("destination") if isinstance(aggregated_data.get("destination"), str) else (aggregated_data.get("destination") or {}).get("name"))
+                or alt_data.get("safe_location_name")
+                or alt_data.get("destination_name")
+                or "destination"
+            )
+            title = f"Route: {departure_harbor} to {dest_name}"
+            if imbl_violation:
+                summary = f"Critical boundary restriction: Navigating across the International Maritime Boundary Line into Sri Lankan waters is illegal and strictly prohibited."
+                cond_lines = [
+                    f"Origin: {departure_harbor}",
+                    f"Destination: {dest_name}",
+                    f"Passage Distance: {dist_nm:.1f} NM",
+                    "IMBL Border Clearance: RESTRICTED / VIOLATION DETECTED",
+                ]
+                recommendation = "Turn back immediately and maintain navigation strictly within sovereign Indian waters."
+                source_line = f"UNCLOS International Maritime Boundary GIS\nStatus: BOUNDARY_HOLD"
+            elif has_cyc_col:
+                c_name = cyc_intel.get("active_storms", "Tropical Storm")
+                summary = f"Severe Tropical Cyclone collision detected: Proposed route intersects active path of {c_name}."
+                cond_lines = [
+                    f"Active Cyclone: {c_name}",
+                    f"Clearance Distance: {clr_str}",
+                    f"Wave Height: {w_ht:.1f} m",
+                ]
+                recommendation = "Cease navigation immediately and initiate emergency evacuation to nearest breakwater basin."
+                source_line = f"GDACS / IMD Cyclone Track Telemetry\nObservation: {dataset_ts}"
+            elif status == "DANGER":
+                summary = f"Severe marine hazards detected along the corridor from {departure_harbor} to {dest_name}. Transit is held."
+                cond_lines = [
+                    f"Passage Distance: {dist_nm:.1f} NM",
+                    f"Wave Height: {w_ht:.1f} m",
+                    f"Wind Speed: {w_spd:.1f} km/h",
+                ]
+                recommendation = "Hold departure until marine conditions improve."
+                source_line = f"ISRO MOSDAC / NHO Navigational Corridors\nObservation: {dataset_ts}"
             else:
-                dest_name = (
-                    (aggregated_data.get("destination") if isinstance(aggregated_data.get("destination"), str) else (aggregated_data.get("destination") or {}).get("name"))
-                    or alt_data.get("safe_location_name")
-                    or alt_data.get("destination_name")
-                    or "destination"
-                )
-                status_tag = "STATUS: GO."
-                explanation = (
-                    f"{status_tag} {inland_prefix}Route analysis complete. Navigational corridor cleared across {dist_nm:.1f} nautical miles to {dest_name}. "
-                    f"Passage maintains safe clearance from coastal shallows, shipping fairways, and the IMBL border with wave heights at {w_ht:.1f} meters. "
-                    f"Refer to plotted waypoints on your mobile map interface."
-                )
+                summary = f"Navigational corridor cleared across {dist_nm:.1f} nautical miles from {departure_harbor} to {dest_name} with favorable sea conditions."
+                cond_lines = [
+                    f"Passage Distance: {dist_nm:.1f} NM",
+                    f"Wave Height: {w_ht:.1f} m",
+                    f"Surface Wind: {w_spd:.1f} km/h {w_dir}",
+                    "Boundary Clearance: Cleared (Sovereign Indian Waters)",
+                ]
+                recommendation = "Proceed along charted fairway corridor and monitor VHF Channel 16."
+                source_line = f"Indian Coast Guard / NHO Nautical Corridors\nObservation: {dataset_ts}"
+
+        elif is_boundary_query:
+            title = f"{departure_harbor} — Maritime Boundary & EEZ Status"
+            border_dist = metrics.get("distance_to_border_nm", 32.5)
+            summary = f"Maritime jurisdictional boundary analysis completed for {departure_harbor}."
+            cond_lines = [
+                f"Operating Sector: {departure_harbor}",
+                "Jurisdiction: Sovereign Indian Exclusive Economic Zone (EEZ)",
+                f"Distance to Border: {border_dist:.1f} NM",
+                f"IMBL Proximity: {'Prohibited international waters' if imbl_violation else 'Clear of foreign boundary'}",
+            ]
+            recommendation = "Comply with sovereign coastal state jurisdiction and maintain active AIS broadcast." if not imbl_violation else "Do not cross IMBL border into Sri Lankan waters."
+            source_line = f"UNCLOS / Maritime Zones of India Act 1976 (High-Res GIS)\nStatus: JURISDICTION_VERIFIED"
+            rec_coords = ""
+
         else:
-            # General marine safety assessment
-            if status == "DANGER":
-                status_tag = "STATUS: NO-GO."
-                explanation = f"{status_tag} {inland_prefix}Severe sea conditions with wave heights reaching {w_ht:.1f} meters. Cease offshore operations immediately."
-            elif status == "WARNING":
-                status_tag = "STATUS: CAUTION."
-                explanation = f"{status_tag} {inland_prefix}Marginal sea conditions detected with wave heights near {w_ht:.1f} meters. Heightened vigilance required."
-            else:
-                status_tag = "STATUS: CONDITIONAL." if has_temporal else "STATUS: GO."
-                temporal_clause = temporal_boundary if has_temporal else ""
-                explanation = f"{status_tag} {inland_prefix}{temporal_clause}Favorable maritime conditions observed with wave heights of {w_ht:.1f} meters and wind speeds of {w_spd:.1f} km/h. Sea state is safe for operations."
+            title = f"{departure_harbor} — Coastal Maritime Advisory"
+            summary = f"Coastal maritime conditions evaluated for {departure_harbor}."
+            cond_lines = [
+                f"Wave Height: {w_ht:.1f} m",
+                f"Surface Wind: {w_spd:.1f} km/h {w_dir}",
+                f"Sea Surface Temperature: {temp:.1f} °C",
+            ]
+            recommendation = "Standard maritime operations permitted. Continue monitoring routine coastal bulletins."
+            source_line = f"ISRO MOSDAC / Copernicus Marine Service\nObservation: {dataset_ts}"
+            rec_coords = ""
+
+        # Section 5 Standardized Structured Response Formatting
+        cond_block = "\n".join(cond_lines)
+        explanation = (
+            f"{title}\n\n"
+            f"Summary:\n{inland_prefix}{summary}\n\n"
+            f"Key conditions:\n{cond_block}\n\n"
+            f"Risk: {risk_level}\n\n"
+            f"Recommendation:\n{recommendation}\n\n"
+            f"Data source:\n{source_line}"
+        )
 
         if forecast_offline:
-            explanation = f"Forecast API offline. Displaying real-time observational data instead. {explanation}"
+            explanation = f"Forecast API offline. Displaying real-time observational data instead.\n\n{explanation}"
 
         cleaned_text = self._clean_tts_text(explanation)
         return {
@@ -2444,6 +2453,9 @@ class ReasoningAgent:
             "text_advisory_local": cleaned_text,
             "map_status": status if forecast_active else ("CONDITIONAL" if (has_temporal and status == "SAFE") else status),
             "recommended_coordinates": rec_coords,
+            "summary": summary,
+            "risk_level": risk_level,
+            "recommendation": recommendation,
         }
 
 def check_spatial_consistency(raw_agent_outputs: Dict[str, Any], resolved_query: str = "") -> Dict[str, Any]:

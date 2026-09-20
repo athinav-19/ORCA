@@ -1446,6 +1446,19 @@ def execute_orca_core(
         except Exception as _alert_err:
             print(f"[Supabase Alert Hook Notice] Disaster hazard processing note: {_alert_err}")
 
+        # Step 6: 12-point Pre-Return Response Validation and Schema Alignment
+        try:
+            from response_validator import validate_orca_response
+            payload, v_logs = validate_orca_response(
+                payload=payload,
+                original_query=original_query,
+                intent=analyzed_intent,
+            )
+            if v_logs:
+                print(f"[ResponseValidator] Validated and aligned response ({len(v_logs)} notices: {v_logs[:2]})")
+        except Exception as _val_err:
+            print(f"[ResponseValidator Warning] Validation note: {_val_err}")
+
         return payload
 
     except Exception as e:

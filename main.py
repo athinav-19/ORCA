@@ -98,11 +98,23 @@ ALLOWED_URGENCIES = {"LOW", "MEDIUM", "HIGH"}
 def classify_marine_query_intent(query_text: str) -> Dict[str, Any]:
     """
     Deterministic rule-based maritime intent classification and dynamic agent execution planner.
-    Accurately isolates:
-    - DISASTER: cyclones, depressions, storm surge, tsunamis, marine disaster warnings
-    - WEATHER: wind, rain, temperature, pressure, fog, gusts, wave heights, sea state
-    - FISHING / PFZ: fish schools, potential fishing zones, pelagic species, SST fronts
-    - ROUTE / NAVIGATION: passage planning, corridors, fairways, waypoints, IMBL border clearance
+    Accurately isolates canonical intents:
+    - WEATHER: wind, rain, temperature, pressure, fog, gusts, atmospheric forecast
+    - OCEAN_CONDITIONS: SST, ocean thermal/salinity properties, general sea conditions
+    - WAVES: wave height, swell direction, sea roughness, wave period
+    - CURRENT: ocean currents, geostrophic vectors, drift
+    - PFZ: potential fishing zone coordinates, thermal-chlorophyll front alignment
+    - FISHING: fishing grounds, target catch (tuna, mackerel, sardine), pelagic aggregation
+    - CYCLONE: tropical cyclones, depressions, storm track, landfall, storm surge
+    - DISASTER: tsunamis, marine emergencies, distress, coastal hazards
+    - SAFE_ROUTE: clear passage between origin and destination avoiding hazards
+    - ROUTE_PLANNING: passage planning, navigation corridors, fairways, waypoints
+    - MARITIME_BOUNDARY: EEZ perimeter, international border clearance, Sri Lanka IMBL
+    - EEZ: sovereign economic zone jurisdiction and compliance
+    - LOCATION: geographic sector coordinates, port lookup
+    - GENERAL_MARINE: broad coastal marine status
+    - MULTI_FACTOR_MARINE: multi-domain maritime inquiries
+    - UNKNOWN: ambiguous or unclassifiable queries
     - GREETING: conversational greetings and capability questions
     """
     q = (query_text or "").lower().strip()
@@ -113,42 +125,45 @@ def classify_marine_query_intent(query_text: str) -> Dict[str, Any]:
         "vanakkam", "namaste", "who are you", "what can you do", "help", "how are you"
     }
     if q in greeting_words or any(q.startswith(g + " ") for g in ["hi", "hello", "hey", "vanakkam", "namaste"]):
-        if not any(k in q for k in ["cyclone", "weather", "fish", "route", "sail", "wave", "wind", "storm"]):
+        if not any(k in q for k in ["cyclone", "weather", "fish", "route", "sail", "wave", "wind", "storm", "eez"]):
             return {
                 "intent": "GREETING",
                 "urgency": "LOW",
                 "plan": []
             }
 
-    # 1. DISASTER / CYCLONE / EMERGENCY
-    disaster_keywords = [
-        "cyclone", "storm", "hurricane", "typhoon", "depression", "tsunami", "surge",
-        "hazard", "warning", "gale", "squall", "emergency", "sos", "distress", "sinking",
-        "capsiz", "radar", "alert", "evacuat"
+    # 1. MARITIME_BOUNDARY / EEZ (Prioritize jurisdictional / border questions)
+    eez_boundary_keywords = [
+        "eez", "exclusive economic zone", "boundary", "border", "imbl", "international waters",
+        "inside india", "in india's eez", "sovereign waters", "jurisdiction", "sri lanka border",
+        "cross border", "border clearance"
     ]
-    # 2. FISHING / PFZ
-    fishing_keywords = [
-        "fish", "fishing", "pfz", "catch", "tuna", "mackerel", "sardine", "seerfish",
-        "hilsa", "shoal", "yield", "chlorophyll", "pelagic", "angler", "anglers",
-        "potential fishing"
-    ]
-    # 3. ROUTE / NAVIGATION
-    route_keywords = [
-        "route", "passage", "waypoint", "waypoints", "corridor", "fairway", "to sri lanka",
-        "colombo", "cross border", "navigate to", "route to", "sail to", "passage to",
-        "plan route", "navigation"
-    ]
-    # 4. WEATHER / METEOROLOGY
-    weather_keywords = [
-        "weather", "wind", "rain", "rainfall", "temperature", "forecast", "cloud",
-        "precipitation", "gust", "fog", "visibility", "pressure", "wave", "waves", "swell",
-        "sea state", "rough sea", "calm sea"
-    ]
+    is_boundary_inquiry = any(k in q for k in eez_boundary_keywords)
+    has_explicit_route = (
+        ("from " in q and " to " in q)
+        or ("between " in q and " and " in q)
+        or any(k in q for k in ["route to", "navigate to", "passage to", "sail to", "sail from", "plan route", "safe route", "safe passage"])
+    )
 
-    # Explicit routing takes precedence when passage / origin-destination is requested
-    if any(k in q for k in ["route", "passage", "waypoint", "navigate to", "route to", "sail from", "to sri lanka", "colombo"]) or ("from " in q and " to " in q):
+    if is_boundary_inquiry and not has_explicit_route:
+        sub_intent = "EEZ" if "eez" in q else "MARITIME_BOUNDARY"
         return {
-            "intent": "ROUTE",
+            "intent": sub_intent,
+            "urgency": "MEDIUM",
+            "plan": [
+                {"agent_name": "GIS_AGENT", "task_instructions": "Verify UNCLOS EEZ boundary and international maritime border clearance.", "expected_output_format": "GEOJSON_POLYGONS"},
+            ]
+        }
+
+    # 2. ROUTE / SAFE_ROUTE / ROUTE_PLANNING
+    is_route_passage = (
+        has_explicit_route
+        or any(k in q for k in ["to sri lanka", "to colombo"])
+    )
+    if is_route_passage:
+        sub_intent = "SAFE_ROUTE" if "safe" in q else "ROUTE_PLANNING"
+        return {
+            "intent": sub_intent,
             "urgency": "MEDIUM",
             "plan": [
                 {"agent_name": "GIS_AGENT", "task_instructions": "Check EEZ boundary, shipping lanes, and navigation corridor.", "expected_output_format": "GEOJSON_POLYGONS"},
@@ -157,60 +172,164 @@ def classify_marine_query_intent(query_text: str) -> Dict[str, Any]:
                 {"agent_name": "DISASTER_AGENT", "task_instructions": "Check cyclone track and storm hazards along route.", "expected_output_format": "TEXT_SUMMARY"},
             ]
         }
-    elif any(k in q for k in disaster_keywords):
+
+    # 3. CYCLONE & DISASTER
+    cyclone_keywords = ["cyclone", "storm", "hurricane", "typhoon", "depression", "storm surge", "storm track"]
+    disaster_keywords = ["tsunami", "hazard", "warning", "gale", "squall", "emergency", "sos", "distress", "sinking", "capsiz", "disaster"]
+    if any(k in q for k in cyclone_keywords):
+        return {
+            "intent": "CYCLONE",
+            "urgency": "HIGH",
+            "plan": [
+                {"agent_name": "DISASTER_AGENT", "task_instructions": "Check active tropical cyclones, depressions, and storm trajectory.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check sustained wind speeds, storm gusts, and pressure drop.", "expected_output_format": "TEXT_SUMMARY"},
+            ]
+        }
+    if any(k in q for k in disaster_keywords):
         return {
             "intent": "DISASTER",
             "urgency": "HIGH",
             "plan": [
-                {"agent_name": "DISASTER_AGENT", "task_instructions": "Check active tropical cyclones, depressions, storm surge, and coastal disaster warnings.", "expected_output_format": "TEXT_SUMMARY"},
-                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check wind speed, gusts, and storm indicators.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "DISASTER_AGENT", "task_instructions": "Check coastal disaster warnings, tsunamis, and severe weather hazards.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check extreme weather parameters and storm indicators.", "expected_output_format": "TEXT_SUMMARY"},
             ]
         }
-    elif any(k in q for k in fishing_keywords):
+
+    # 4. PFZ & FISHING
+    pfz_keywords = ["pfz", "potential fishing zone", "potential fishing", "chlorophyll front", "sst front", "thermal front"]
+    fishing_keywords = ["fish", "fishing", "catch", "tuna", "mackerel", "sardine", "seerfish", "hilsa", "shoal", "yield", "pelagic", "angler", "anglers"]
+    if any(k in q for k in pfz_keywords):
+        return {
+            "intent": "PFZ",
+            "urgency": "LOW",
+            "plan": [
+                {"agent_name": "PFZ_AGENT", "task_instructions": "Extract verified PFZ zones, SST gradients, and chlorophyll-a fronts.", "expected_output_format": "GEOJSON_POINTS"},
+                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check SST and oceanographic sea conditions at fishing sector.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check operational sea safety and wave heights.", "expected_output_format": "TEXT_SUMMARY"},
+            ]
+        }
+    if any(k in q for k in fishing_keywords):
         return {
             "intent": "FISHING",
             "urgency": "LOW",
             "plan": [
-                {"agent_name": "PFZ_AGENT", "task_instructions": "Check potential fishing zones, SST, and chlorophyll fronts.", "expected_output_format": "GEOJSON_POINTS"},
-                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check sea surface temperature, currents, and wave heights at fishing sector.", "expected_output_format": "TEXT_SUMMARY"},
-                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check sea safety, wind speed, and wave conditions at fishing zone.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "PFZ_AGENT", "task_instructions": "Check pelagic fish habitat suitability and PFZ grounds.", "expected_output_format": "GEOJSON_POINTS"},
+                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check oceanographic telemetry and sea surface temperature.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check marine weather and wave safety for small craft operations.", "expected_output_format": "TEXT_SUMMARY"},
             ]
         }
-    elif any(k in q for k in weather_keywords):
+
+    # 5. WAVES & CURRENTS & OCEAN_CONDITIONS
+    wave_keywords = ["wave", "waves", "swell", "sea state", "rough sea", "calm sea", "wave height"]
+    current_keywords = ["current", "currents", "geostrophic", "tidal current", "drift"]
+    ocean_keywords = ["sea surface temperature", "sst", "ocean temperature", "sea condition", "sea conditions", "ocean condition", "ocean conditions", "ocean state"]
+
+    if any(k in q for k in current_keywords):
+        return {
+            "intent": "CURRENT",
+            "urgency": "LOW",
+            "plan": [
+                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check ocean current velocity and direction.", "expected_output_format": "TEXT_SUMMARY"},
+            ]
+        }
+    if any(k in q for k in wave_keywords):
+        return {
+            "intent": "WAVES",
+            "urgency": "LOW",
+            "plan": [
+                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check significant wave height (SWH), swell direction, and sea state roughness.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check surface wind speed driving wind waves.", "expected_output_format": "TEXT_SUMMARY"},
+            ]
+        }
+    if any(k in q for k in ocean_keywords):
+        return {
+            "intent": "OCEAN_CONDITIONS",
+            "urgency": "LOW",
+            "plan": [
+                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check sea surface temperature (SST) and physical oceanographic state.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check surface meteorological parameters.", "expected_output_format": "TEXT_SUMMARY"},
+            ]
+        }
+
+    # 6. WEATHER / METEOROLOGY
+    weather_keywords = [
+        "weather", "wind", "rain", "rainfall", "temperature", "forecast", "cloud",
+        "precipitation", "gust", "fog", "visibility", "pressure", "barometer"
+    ]
+    if any(k in q for k in weather_keywords):
         return {
             "intent": "WEATHER",
             "urgency": "LOW",
             "plan": [
-                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check temperature, wind speed, gusts, rainfall, visibility, and atmospheric pressure.", "expected_output_format": "TEXT_SUMMARY"},
-                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check wave height, swell direction, and sea state.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check wind speed, gusts, rainfall, visibility, and atmospheric pressure.", "expected_output_format": "TEXT_SUMMARY"},
             ]
         }
-    else:
+
+    # 7. LOCATION
+    location_keywords = ["coordinates of", "where is port", "port location", "find coordinates", "port of"]
+    if any(k in q for k in location_keywords):
         return {
-            "intent": "WEATHER",
+            "intent": "LOCATION",
             "urgency": "LOW",
             "plan": [
-                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check wind speed, wave height, and visibility.", "expected_output_format": "TEXT_SUMMARY"},
-                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check sea state roughness and currents.", "expected_output_format": "TEXT_SUMMARY"},
-                {"agent_name": "DISASTER_AGENT", "task_instructions": "Check cyclone track and storm hazards.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "GIS_AGENT", "task_instructions": "Resolve coastal port or maritime sector geographic coordinates.", "expected_output_format": "TEXT_SUMMARY"},
             ]
         }
+
+    # 8. GENERAL_MARINE / UNKNOWN
+    general_marine_keywords = ["sea", "ocean", "water", "marine", "sailing", "boating"]
+    if any(k in q for k in general_marine_keywords):
+        return {
+            "intent": "GENERAL_MARINE",
+            "urgency": "LOW",
+            "plan": [
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check general coastal weather and wind.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check sea state roughness and wave height.", "expected_output_format": "TEXT_SUMMARY"},
+            ]
+        }
+
+    return {
+        "intent": "UNKNOWN",
+        "urgency": "LOW",
+        "plan": [
+            {"agent_name": "WEATHER_AGENT", "task_instructions": "Check general maritime weather.", "expected_output_format": "TEXT_SUMMARY"},
+            {"agent_name": "OCEAN_AGENT", "task_instructions": "Check wave height and sea conditions.", "expected_output_format": "TEXT_SUMMARY"},
+        ]
+    }
 
 
 def normalize_intent_category(intent_str: str, query_str: str = "") -> str:
     """Normalizes arbitrary intent descriptions or LLM outputs to canonical categories."""
     combined = f"{intent_str} {query_str}".lower()
-    if any(k in combined for k in ["cyclone", "storm", "hurricane", "typhoon", "disaster", "depression", "tsunami"]):
+    if any(k in combined for k in ["safe route", "route to", "passage", "navigate to", "fairway", "corridor"]):
+        return "SAFE_ROUTE" if "safe" in combined else "ROUTE_PLANNING"
+    if any(k in combined for k in ["eez", "exclusive economic zone"]):
+        return "EEZ"
+    if any(k in combined for k in ["border", "boundary", "imbl", "jurisdiction"]):
+        return "MARITIME_BOUNDARY"
+    if any(k in combined for k in ["cyclone", "typhoon", "hurricane", "depression"]):
+        return "CYCLONE"
+    if any(k in combined for k in ["tsunami", "disaster", "hazard", "warning", "emergency", "squall"]):
         return "DISASTER"
-    if any(k in combined for k in ["fish", "pfz", "catch", "tuna", "mackerel", "sardine", "angler"]):
+    if any(k in combined for k in ["pfz", "potential fishing zone", "potential fishing"]):
+        return "PFZ"
+    if any(k in combined for k in ["fish", "fishing", "catch", "tuna", "mackerel", "sardine", "angler"]):
         return "FISHING"
-    if any(k in combined for k in ["route", "passage", "navigate", "waypoint", "sri lanka", "colombo"]):
-        return "ROUTE"
-    if any(k in combined for k in ["weather", "wind", "rain", "temperature", "forecast", "wave"]):
+    if any(k in combined for k in ["wave", "swell", "sea state", "rough sea"]):
+        return "WAVES"
+    if any(k in combined for k in ["current", "drift"]):
+        return "CURRENT"
+    if any(k in combined for k in ["sst", "sea surface temperature", "ocean condition"]):
+        return "OCEAN_CONDITIONS"
+    if any(k in combined for k in ["weather", "wind", "rain", "temperature", "forecast", "pressure"]):
         return "WEATHER"
     if any(k in combined for k in ["greet", "conversational", "hello", "hi", "welcome"]):
         return "GREETING"
-    return "WEATHER"
+    if any(k in combined for k in ["location", "coordinates", "where is"]):
+        return "LOCATION"
+    if any(k in combined for k in ["marine", "ocean", "sea"]):
+        return "GENERAL_MARINE"
+    return "UNKNOWN"
 
 
 def extract_locations_from_query(query_text: str) -> Dict[str, Any]:
@@ -319,12 +438,14 @@ def resolve_location_context(
     query_text: str,
     device_telemetry: Optional[Dict[str, Any]] = None,
     gis_agent: Optional[Any] = None,
+    previous_location: Optional[Any] = None,
 ) -> Tuple[LocationContext, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
     Enforces the strict location resolution contract:
     PRIORITY 1: Explicit user location in query (Mumbai, Chennai, Kochi, etc.)
     PRIORITY 2: Route origin and destination
     PRIORITY 3: Device GPS (only when 'near me' or location omitted)
+    PRIORITY 3.5: Multi-turn conversational context inheritance (from previous turn)
     PRIORITY 4: None -> LOCATION_REQUIRED
     
     Returns: (location_context, origin_dict, destination_dict)
@@ -436,6 +557,25 @@ def resolve_location_context(
             longitude=dev_lon,
         )
         return lc, None, None
+
+    # Priority 3.5: Multi-Turn Conversational Memory (Inherit location from previous turn)
+    if previous_location:
+        prev_name = (
+            previous_location.get("name")
+            if isinstance(previous_location, dict)
+            else (previous_location[0] if isinstance(previous_location, list) and previous_location else str(previous_location))
+        )
+        if prev_name:
+            res_prev = gis_agent.resolve_location(prev_name)
+            if not res_prev.get("is_unknown"):
+                lc = LocationContext(
+                    source=LocationSource.USER_QUERY,
+                    status=LocationStatus.RESOLVED,
+                    name=res_prev.get("name", prev_name),
+                    latitude=res_prev.get("lat"),
+                    longitude=res_prev.get("lon"),
+                )
+                return lc, None, None
 
     # Priority 4: No location specified and no GPS available (Default = NONE -> LOCATION_REQUIRED)
     lc = LocationContext(
@@ -715,33 +855,71 @@ class ManagerAgent:
         elif gps_str:
             deterministic_locations = [gps_str]
 
+        # Multi-turn conversational memory context & inheritance
+        session_history = self.sessions.get(session_id, [])
+        prev_loc = None
+        prev_intent = None
+        if session_history:
+            prev_turn = session_history[-1]
+            prev_loc = prev_turn.get("location") or (prev_turn.get("locations")[0] if prev_turn.get("locations") else None)
+            prev_intent = prev_turn.get("intent")
+
+        if not deterministic_locations and prev_loc:
+            deterministic_locations = [prev_loc]
+
+        deterministic_info = classify_marine_query_intent(effective_query)
+        deterministic_intent = deterministic_info["intent"]
+        deterministic_plan = deterministic_info["plan"]
+        deterministic_urgency = deterministic_info["urgency"]
+
+        # Temporal follow-up intent inheritance (e.g., "What about tomorrow?")
+        from decision_engine import detect_temporal_intent
+        temp_chk = detect_temporal_intent(effective_query)
+        if temp_chk.get("has_temporal_intent") and deterministic_intent in ("WEATHER", "GENERAL_MARINE", "UNKNOWN"):
+            if prev_intent and prev_intent not in ("GREETING", "UNKNOWN"):
+                deterministic_intent = prev_intent
+                inherited_info = classify_marine_query_intent(f"{prev_intent} {effective_query}")
+                deterministic_plan = inherited_info["plan"]
+                deterministic_urgency = inherited_info["urgency"]
+
+        def record_turn(intent_val, locs_val):
+            session_history.append(
+                {
+                    "query": effective_query,
+                    "intent": intent_val,
+                    "locations": locs_val,
+                    "location": locs_val[0] if locs_val else None,
+                }
+            )
+            self.sessions[session_id] = session_history[-5:]
+            self.chat_history = self.sessions[session_id]
+
         api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
+        if not api_key or FAST_DEMO_MODE:
+            record_turn(deterministic_intent, deterministic_locations)
             return {
                 "session_id": session_id,
                 "client_timestamp": client_timestamp,
                 "device_telemetry": telemetry,
-                "analyzed_intent": "Error: GEMINI_API_KEY not found",
+                "analyzed_intent": deterministic_intent,
                 "user_persona": user_context.get("persona", "FISHERMAN"),
                 "source_language_code": "en",
                 "location_entities": deterministic_locations,
-                "time_entities": [],
-                "execution_plan": [],
-                "urgency_level": "LOW",
-                "error": "Please set your GEMINI_API_KEY in the .env file.",
+                "time_entities": ["today"],
+                "execution_plan": deterministic_plan,
+                "urgency_level": deterministic_urgency,
             }
 
         # Format session-specific conversational memory context
-        session_history = self.sessions.get(session_id, [])
         history_text = ""
         if session_history:
             history_lines = [f"Conversational History for Session [{session_id}]:"]
             for idx, turn in enumerate(session_history, 1):
-                prev_query = turn.get("query", "")
-                prev_intent = turn.get("intent", "")
-                prev_locs = turn.get("locations", [])
+                prev_q = turn.get("query", "")
+                prev_i = turn.get("intent", "")
+                prev_ls = turn.get("locations", [])
                 history_lines.append(
-                    f"Turn {idx}: User asked: \"{prev_query}\" | Resolved Intent: \"{prev_intent}\" | Locations: {prev_locs}"
+                    f"Turn {idx}: User asked: \"{prev_q}\" | Resolved Intent: \"{prev_i}\" | Locations: {prev_ls}"
                 )
             history_text = "\n".join(history_lines) + "\n\n"
 
@@ -758,27 +936,8 @@ class ManagerAgent:
             "Analyze the current query in light of telemetry & conversational history and output the JSON routing plan."
         )
 
-        deterministic_info = classify_marine_query_intent(effective_query)
-        deterministic_intent = deterministic_info["intent"]
-        deterministic_plan = deterministic_info["plan"]
-        deterministic_urgency = deterministic_info["urgency"]
-
-        if FAST_DEMO_MODE:
-            return {
-                "session_id": session_id,
-                "client_timestamp": client_timestamp,
-                "device_telemetry": telemetry,
-                "analyzed_intent": deterministic_intent,
-                "user_persona": user_context.get("persona", "FISHERMAN"),
-                "source_language_code": "en",
-                "location_entities": deterministic_locations,
-                "time_entities": ["today"],
-                "execution_plan": deterministic_plan,
-                "urgency_level": deterministic_urgency,
-            }
-
         response = None
-        if self.model and os.getenv("GEMINI_API_KEY"):
+        if self.model and api_key:
             try:
                 response = self.model.generate_content(
                     prompt,
@@ -792,6 +951,7 @@ class ManagerAgent:
                     print(f"[ManagerAgent Notice] Gemini quota/rate limit reached (429). Immediate fallback to deterministic multi-agent routing plan.")
                 else:
                     print(f"[ManagerAgent Notice] Query planning fallback: {err_str[:120]}")
+                record_turn(deterministic_intent, deterministic_locations)
                 return {
                     "session_id": session_id,
                     "client_timestamp": client_timestamp,
@@ -806,18 +966,18 @@ class ManagerAgent:
                 }
 
         if response is None:
+            record_turn(deterministic_intent, deterministic_locations)
             return {
                 "session_id": session_id,
                 "client_timestamp": client_timestamp,
                 "device_telemetry": telemetry,
-                "analyzed_intent": "Error: No response generated",
+                "analyzed_intent": deterministic_intent,
                 "user_persona": user_context.get("persona", "FISHERMAN"),
                 "source_language_code": "en",
                 "location_entities": deterministic_locations,
-                "time_entities": [],
-                "execution_plan": [],
-                "urgency_level": "LOW",
-                "error": "Failed to receive response from LLM.",
+                "time_entities": ["today"],
+                "execution_plan": deterministic_plan,
+                "urgency_level": deterministic_urgency,
             }
 
         try:
@@ -1339,10 +1499,16 @@ def process_marine_request(
             user_context["persona"] = persona
 
     # Step 2.9: Strict Location Resolution Contract
-    # Enforces: Explicit User Location > Route Origin/Dest > Device GPS > Default (NONE -> LOCATION_REQUIRED)
+    # Enforces: Explicit User Location > Route Origin/Dest > Device GPS > Multi-Turn Memory > Default (NONE -> LOCATION_REQUIRED)
+    prev_loc_cand = None
+    if manager and hasattr(manager, "sessions") and session_id in manager.sessions and manager.sessions[session_id]:
+        last_turn = manager.sessions[session_id][-1]
+        prev_loc_cand = last_turn.get("location") or (last_turn.get("locations")[0] if last_turn.get("locations") else None)
+
     location_context, origin_info, dest_info = resolve_location_context(
         english_text,
         device_telemetry=device_telemetry,
+        previous_location=prev_loc_cand,
     )
 
     if location_context.status == LocationStatus.LOCATION_REQUIRED:

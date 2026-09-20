@@ -332,8 +332,19 @@ class OrcaResponse(BaseModel):
     prompt_suggestions: Optional[List[str]] = Field(None, description="Suggested prompt follow-ups")
     satellite_provenance: Optional[Dict[str, Any]] = Field(None, description="Dual-agency satellite telemetry provenance")
     location_context: Optional[Dict[str, Any]] = Field(None, description="Resolved shared location context")
+    location: Optional[Dict[str, Any]] = Field(None, description="Standardized geographic location details")
     origin: Optional[Dict[str, Any]] = Field(None, description="Resolved route departure origin")
     destination: Optional[Dict[str, Any]] = Field(None, description="Resolved route arrival destination")
+    intent: Optional[str] = Field(None, description="Canonical query intent category")
+    summary: Optional[str] = Field(None, description="Concise 1-2 sentence query summary")
+    conditions: Optional[Dict[str, Any]] = Field(None, description="Relevant observed/forecast conditions")
+    risk: Optional[Dict[str, Any]] = Field(None, description="Standardized risk summary {level, score}")
+    recommendation: Optional[str] = Field(None, description="Actionable recommendation")
+    provenance: Optional[List[Dict[str, Any]]] = Field(None, description="Detailed data provenance list")
+    visualization: Optional[Dict[str, Any]] = Field(None, description="Visualization metadata (ROUTE, BOUNDARY) or null")
+    data_quality: Optional[str] = Field("GOOD", description="Data freshness and quality status")
+    timestamp: Optional[str] = Field(None, description="ISO timestamp of response generation")
+    model_versions: Optional[Dict[str, Any]] = Field(None, description="Active ML and heuristic model versions")
 
     model_config = {"extra": "allow"}
 
