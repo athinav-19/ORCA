@@ -383,9 +383,9 @@ class GisAgent:
             try:
                 pt = Point(lon, lat)
                 if self.prepared_eez is not None:
-                    in_eez = bool(self.prepared_eez.contains(pt) or self.eez_shape.intersects(pt))
+                    in_eez = bool(self.prepared_eez.contains(pt) or self.eez_shape.intersects(pt) or self.eez_shape.distance(pt) <= 0.05)
                 else:
-                    in_eez = bool(self.eez_shape.contains(pt) or self.eez_shape.intersects(pt))
+                    in_eez = bool(self.eez_shape.contains(pt) or self.eez_shape.intersects(pt) or self.eez_shape.distance(pt) <= 0.05)
             except Exception:
                 in_eez = True
 
@@ -614,9 +614,9 @@ class GisAgent:
             pt = Point(lon, lat)
             try:
                 if self.prepared_eez is not None:
-                    is_within_eez = bool(self.prepared_eez.contains(pt) or self.eez_shape.intersects(pt))
+                    is_within_eez = bool(self.prepared_eez.contains(pt) or self.eez_shape.intersects(pt) or self.eez_shape.distance(pt) <= 0.05)
                 else:
-                    is_within_eez = bool(self.eez_shape.contains(pt) or self.eez_shape.intersects(pt))
+                    is_within_eez = bool(self.eez_shape.contains(pt) or self.eez_shape.intersects(pt) or self.eez_shape.distance(pt) <= 0.05)
             except Exception:
                 is_within_eez = dist_nm <= self.MAX_EEZ_LIMIT_NM
 

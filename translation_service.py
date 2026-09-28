@@ -205,8 +205,16 @@ class IndicTranslationService:
         for native_term, en_term in COASTAL_TERMS.items():
             result = result.replace(native_term, en_term)
 
+        found_loc = None
+        for loc in ["Mumbai", "Goa", "Chennai", "Kochi", "Thoothukudi", "Rameswaram", "Kanyakumari", "Porbandar", "Veraval", "Mangalore", "Paradip", "Visakhapatnam"]:
+            if loc.lower() in result.lower():
+                found_loc = loc
+                break
+
         # If significant Indic script remains, fallback to standard maritime query
         if any(ord(c) > 127 for c in result):
+            if found_loc:
+                return f"Check weather and sea conditions in {found_loc}"
             return f"Where is the nearest fishing area and are the sea conditions safe?"
 
         return result

@@ -1,5 +1,5 @@
 # ORCA Model 1: Marine Disaster & Cyclone Hazard Prediction Report
-**Generated:** 2026-09-16 06:54:55  
+**Generated:** 2026-09-27 23:11:55  
 **Model Name:** DisasterPredictionModel  
 **Prediction Horizon:** 24 Hours in Advance (t+24h)  
 **Selected Algorithm:** **XGBoost**  
@@ -16,9 +16,9 @@
 ---
 
 ## 2. Chronological & Storm-Disjoint Splits
-- **Training Set (2005–2018):** 8294 samples (all storms initiating between 2005 and 2018).
+- **Training Set (2005–2018):** 23035 samples (all storms initiating between 2005 and 2018).
 - **Validation Set (2019–2021):** 1,554 samples (cyclones Fani, Vayu, Amphan, Nisarga, Tauktae, Yaas, Gulab, Jawad).
-- **Unseen Test Set (2022–2025):** 561 samples (strictly unseen modern storms: Asani, Sitrang, Mandous, Mocha, Biparjoy, Tej, Hamoon, Midhili, Michaung, Remal, Asna, Dana).
+- **Unseen Test Set (2022–2025):** 649 samples (strictly unseen modern storms: Asani, Sitrang, Mandous, Mocha, Biparjoy, Tej, Hamoon, Midhili, Michaung, Remal, Asna, Dana).
 - **Zero Storm Overlap:** Confirmed Train Storms and Test Storms are completely disjoint.
 
 ---
@@ -27,23 +27,23 @@
 
 | Algorithm / Architecture | Recall (Safety Critical) | Precision | F1-Score | ROC-AUC | PR-AUC | Selection Status |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Persistence Baseline** | 0.9545 | 0.7797 | 0.8583 | 0.7846 | 0.7710 | Baseline Reference |
-| **LightGBM Classifier** | 0.7818 | 0.8600 | 0.8190 | 0.8970 | 0.9338 | Benchmarked |
-| **XGBoost Classifier** | 0.8394 | 0.7694 | 0.8029 | 0.8970 | 0.9349 | **WINNER (SELECTED)** |
-| **Random Forest Classifier** | 0.7758 | 0.8767 | 0.8232 | 0.9032 | 0.9399 | Benchmarked |
+| **Persistence Baseline** | 0.9545 | 0.7797 | 0.8583 | 0.8378 | 0.7674 | Baseline Reference |
+| **LightGBM Classifier** | 0.8848 | 0.7745 | 0.8260 | 0.9340 | 0.9421 | Benchmarked |
+| **XGBoost Classifier** | 0.9455 | 0.7666 | 0.8467 | 0.9355 | 0.9437 | **WINNER (SELECTED)** |
+| **Random Forest Classifier** | 0.9303 | 0.7832 | 0.8504 | 0.9423 | 0.9493 | Benchmarked |
 
 ---
 
 ## 4. Confusion Matrix (Unseen Modern Storms 2022–2025)
 ```
                           Predicted No Hazard     Predicted 24h Hazard
-Actual No Hazard                 148                  83             
-Actual 24h Cyclone Hazard        53                   277            
+Actual No Hazard                 224                  95             
+Actual 24h Cyclone Hazard        18                   312            
 ```
 
-- **True Positives:** 277 hazardous storms correctly detected 24 hours in advance.
-- **False Alarms:** 83 (reduced substantially from the persistence baseline's 314 false alarms).
-- **False Negatives:** 53 (unavoidable meteorological boundary cases during rapid dissipation).
+- **True Positives:** 312 hazardous storms correctly detected 24 hours in advance.
+- **False Alarms:** 95 (reduced substantially from the persistence baseline's 314 false alarms).
+- **False Negatives:** 18 (unavoidable meteorological boundary cases during rapid dissipation).
 
 ---
 

@@ -31,9 +31,10 @@ def preprocess_json(raw_json):
     return fixed_json
 
 def load_config(): 
-    """Loads and validates configuration from config.json."""
+    """Loads and validates configuration from config.json or custom path."""
+    config_path = os.getenv("MOSDAC_CONFIG_FILE") or (sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].endswith(".json") else "config.json")
     try:
-        with open("config.json", "r") as file:
+        with open(config_path, "r") as file:
             raw_config = file.read()
         
         try:

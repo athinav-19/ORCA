@@ -166,14 +166,33 @@ def validate_orca_response(
     existing_prov = payload.get("provenance")
     if not existing_prov or not isinstance(existing_prov, list):
         sat_prov = payload.get("satellite_provenance") or {}
+        cache_status = sat_prov.get("cache_status")
+        cache_age = sat_prov.get("cache_age_hours")
+        fallback_reason = sat_prov.get("fallback_reason")
+
+        if cache_status == "STALE_CACHE":
+            mosdac_freshness = "STALE_CACHE"
+        elif cache_status == "DATA_UNAVAILABLE":
+            mosdac_freshness = "DATA_UNAVAILABLE"
+        else:
+            mosdac_freshness = "NEAR_REAL_TIME"
+
+        mosdac_item = {
+            "source": sat_prov.get("primary_agency", "ISRO MOSDAC"),
+            "product": "Oceansat-3 / INSAT-3DR Telemetry",
+            "classification": "OBSERVATION",
+            "timestamp": sat_prov.get("dataset_timestamp") or payload.get("timestamp"),
+            "freshness": mosdac_freshness,
+        }
+        if cache_status:
+            mosdac_item["cache_status"] = cache_status
+        if cache_age is not None:
+            mosdac_item["cache_age_hours"] = cache_age
+        if fallback_reason:
+            mosdac_item["fallback_reason"] = fallback_reason
+
         prov_list = [
-            {
-                "source": sat_prov.get("primary_agency", "ISRO MOSDAC"),
-                "product": "Oceansat-3 / INSAT-3DR Telemetry",
-                "classification": "OBSERVATION",
-                "timestamp": payload.get("timestamp"),
-                "freshness": "NEAR_REAL_TIME",
-            },
+            mosdac_item,
             {
                 "source": sat_prov.get("secondary_agency", "Copernicus Marine Service"),
                 "product": "CMEMS Global Ocean Analysis",

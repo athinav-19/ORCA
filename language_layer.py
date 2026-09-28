@@ -470,6 +470,20 @@ class LanguageLayer:
             "engine": "deterministic_script_lexicon",
         }
 
+    def _deterministic_translate_to_english(self, raw_text: str, det_code: str) -> str:
+        """Translates using the coastal dictionary keywords if external translation APIs fail."""
+        found_keywords = []
+        for word in raw_text.split():
+            cleaned = word.strip("?,.!;:\'\"")
+            if cleaned in self.COASTAL_DICTIONARY and self.COASTAL_DICTIONARY[cleaned] not in found_keywords:
+                found_keywords.append(self.COASTAL_DICTIONARY[cleaned])
+        for k, v in self.COASTAL_DICTIONARY.items():
+            if k in raw_text and v not in found_keywords:
+                found_keywords.append(v)
+        if found_keywords:
+            return f"Check {' '.join(found_keywords)}"
+        return raw_text
+
     def translate_advisory(
         self,
         english_advisory: str,

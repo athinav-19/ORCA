@@ -2,9 +2,9 @@
   "DISASTER": "COMPLETED",
   "WEATHER": "COMPLETED",
   "OCEAN": "DETERMINISTIC",
-  "PFZ": "PENDING_REAL_GROUND_TRUTH",
-  "OVERALL": "HARDENED_REAL_DATA_PIPELINE",
-  "last_updated": "2026-09-16T09:00:00",
+  "PFZ": "COMPLETED",
+  "OVERALL": "COMPLETED",
+  "last_updated": "2026-09-27T23:11:55.693265",
   "version": "v4.0-RealData-Verified",
   "notes": {
     "weather": "Retrained on genuine ECMWF ERA5 reanalysis & operational analysis (1980-01-01 to 2026-09-13). 409,248 clean samples across 6 Indian EEZ nodes with strict 72h horizon boundary buffers.",

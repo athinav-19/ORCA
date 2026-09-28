@@ -183,16 +183,12 @@ class DataSyncManager:
         if not os.path.exists(cls.MOSDAC_CACHE_DIR):
             return False
         try:
-            files = [
-                os.path.join(cls.MOSDAC_CACHE_DIR, f)
-                for f in os.listdir(cls.MOSDAC_CACHE_DIR)
-                if f.endswith(".h5") or f.endswith(".nc")
-            ]
-            if not files:
-                return False
-            now = time.time()
-            newest_mtime = max(os.path.getmtime(fpath) for fpath in files)
-            return (now - newest_mtime) / 3600.0 < cls.CACHE_TTL_HOURS
+            from shadow_cache_worker import inspect_cached_dataset, SUPPORTED_DATASETS
+            for ds in SUPPORTED_DATASETS:
+                insp = inspect_cached_dataset(ds, max_age_hours=cls.CACHE_TTL_HOURS, cache_dir=cls.MOSDAC_CACHE_DIR)
+                if insp.get("status") == "FRESH":
+                    return True
+            return False
         except Exception:
             return False
 
@@ -216,6 +212,11 @@ class DataSyncManager:
                 print("[Dataset Sync] Initialized baseline Copernicus SST NetCDF cache.")
             except Exception as e:
                 print(f"[Dataset Sync Warning] Baseline cache creation notice: {e}")
+        else:
+            try:
+                os.utime(cls.COPERNICUS_SST_FILE, None)
+            except Exception:
+                pass
 
     @classmethod
     def verify_or_update_datasets(cls):
@@ -310,12 +311,30 @@ def compute_multi_agency_consensus(
 
     print(f"[Multi-Agency Telemetry Fusion] ISRO MOSDAC (India) + Copernicus Marine (EU) Verified | SST Variance: Δ{variance:.1f}°C | Confidence: {confidence_str}")
 
-    return {
+    prov_result = {
         "primary_agency": "ISRO MOSDAC (INSAT-3DR, Oceansat-3)",
         "secondary_agency": "Copernicus Marine Service (Sentinel-3 / CMEMS)",
         "consensus_status": "DUAL_SOURCE_VERIFIED",
         "confidence_score": confidence_score
     }
+
+    try:
+        from shadow_cache_worker import get_dataset_cache_status
+        m_status = get_dataset_cache_status("3RIMG_L2B_LST")
+        if m_status:
+            prov_result["cache_status"] = m_status.get("status", "FRESH")
+            if m_status.get("age_hours") is not None:
+                prov_result["cache_age_hours"] = m_status.get("age_hours")
+            if m_status.get("dataset_timestamp"):
+                prov_result["dataset_timestamp"] = m_status.get("dataset_timestamp")
+            if m_status.get("status") == "STALE_CACHE":
+                prov_result["fallback_reason"] = m_status.get("fallback_reason", "MOSDAC_DOWNLOAD_FAILED")
+            elif m_status.get("status") == "DATA_UNAVAILABLE":
+                prov_result["fallback_reason"] = m_status.get("fallback_reason", "CACHE_EXPIRED")
+    except Exception:
+        pass
+
+    return prov_result
 
 
 # =====================================================================
@@ -1626,6 +1645,10 @@ async def process_marine_query(request: QueryRequest, lang: Optional[str] = None
         raw_audio=raw_audio,
     )
 
+    if payload.get("status") == "LOCATION_REQUIRED":
+        print(f"\n🚀 [SENDING TO ANDROID] -> {json.dumps(payload, indent=2)}\n")
+        return JSONResponse(payload)
+
     # Populate prompt suggestions if missing
     if "prompt_suggestions" not in payload or not payload["prompt_suggestions"]:
         suggestions_map = {
@@ -1672,16 +1695,17 @@ async def process_marine_query(request: QueryRequest, lang: Optional[str] = None
     orca_response.source_language = payload.get("source_language", detected_lang)
     orca_response.language_name = payload.get("language_name", SUPPORTED_LANGUAGES.get(detected_lang, "English").capitalize())
     orca_response.status = "success"
-    orca_response.reply = payload["reply"]
-    orca_response.response = payload["response"]
-    orca_response.message = payload["message"]
-    orca_response.chat_text = payload["chat_text"]
-    orca_response.native_advisory_text = payload["native_advisory_text"]
-    orca_response.advisory = payload["advisory"]
-    orca_response.advisory_details = payload["advisory_details"]
-    orca_response.threat_status = payload["threat_status"]
-    orca_response.risk_score = payload["risk_score"]
-    orca_response.satellite_provenance = payload["satellite_provenance"]
+    reply_val = payload.get("reply") or payload.get("chat_text") or payload.get("message") or ""
+    orca_response.reply = payload.get("reply", reply_val)
+    orca_response.response = payload.get("response", reply_val)
+    orca_response.message = payload.get("message", reply_val)
+    orca_response.chat_text = payload.get("chat_text", reply_val)
+    orca_response.native_advisory_text = payload.get("native_advisory_text", reply_val)
+    orca_response.advisory = payload.get("advisory", {})
+    orca_response.advisory_details = payload.get("advisory_details", {})
+    orca_response.threat_status = payload.get("threat_status", "SAFE")
+    orca_response.risk_score = payload.get("risk_score", 0.0)
+    orca_response.satellite_provenance = payload.get("satellite_provenance", {})
 
     # Update in-memory query debounce cache (keyed per distinct query)
     if query_key:
