@@ -49,3 +49,38 @@ user_prompt*.txt
 # OS specific files
 .DS_Store
 Thumbs.db
+
+# Test runner caches and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checking and linting caches
+.mypy_cache/
+.ruff_cache/
+.ropeproject/
+
+# Generated training and pipeline outputs (not required at runtime)
+# Regenerate with: python train_all_models.py
+training_status.json
+
+# Root-level development/debugging test scripts (not part of structured test suite)
+# Canonical regression tests live in tests/ directory
+test_api_trained_models_integration.py
+test_automatic_alert_system.py
+test_copernicus_sync.py
+test_gemini_synthesis_prompt.py
+test_green_marine_energy.py
+test_indic_translation.py
+test_live_server_multilingual.py
+test_location_awareness.py
+test_ml_hybrid_pipeline.py
+test_multilingual_pipeline.py
+test_no_fake_fallbacks.py
+test_pfz_real_model.py
+test_routing_srilanka_landmask.py
+test_satellite_gateway.py
+test_shadow_cache.py
+test_sms_integration.py
+test_supabase_alerts.py
