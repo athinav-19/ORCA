@@ -2883,7 +2883,16 @@ def run_decision_engine(
     print(f"    - Model Active         : {reasoning_agent.model_name}")
 
     intent_cat_run = (raw_agent_outputs.get("analyzed_intent") or "").upper() if raw_agent_outputs else ""
-    is_explicit_route_query = (intent_cat_run in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")) or any(k in resolved_query.lower() for k in ["route", "passage", "sail from", "navigate to", "route to", "waypoint", "to sri lanka", "colombo"]) or ("from " in resolved_query.lower() and " to " in resolved_query.lower())
+    is_explicit_route_query = (
+        (intent_cat_run in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING"))
+        or (("from " in resolved_query.lower() and " to " in resolved_query.lower()) and not any(b in resolved_query.lower() for b in ["eez", "boundary", "border"]))
+        or any(k in resolved_query.lower() for k in ["safe route", "plan route", "route from", "route to", "sail from", "navigate to", "passage from", "waypoint to", "to sri lanka"])
+        or (re.search(r"\b(navigate|sail|route|passage)\s+to\s+colombo\b", resolved_query.lower()) is not None)
+    )
+    if intent_cat_run in ("MARITIME_BOUNDARY", "EEZ", "CYCLONE", "DISASTER", "WEATHER", "OCEAN", "OCEAN_CONDITIONS", "WAVES", "PFZ", "FISHING"):
+        if not (("from " in resolved_query.lower() and " to " in resolved_query.lower()) or "safe route" in resolved_query.lower() or "route to" in resolved_query.lower()):
+            is_explicit_route_query = False
+
     is_departure_window_query = any(k in resolved_query.lower() for k in [
         "departure window", "safe departure", "sailing window", "safe to sail",
         "when can i sail", "safe to depart", "departure time", "when to depart",

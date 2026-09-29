@@ -266,7 +266,11 @@ class DataSyncManager:
 
 def verify_or_update_datasets():
     """Pre-flight function called at the start of /chat or /query."""
-    return DataSyncManager.verify_or_update_datasets()
+    try:
+        return DataSyncManager.verify_or_update_datasets()
+    except Exception as e:
+        print(f"[Dataset Sync Notice] verify_or_update_datasets notice: {e}")
+        return True
 
 
 def compute_multi_agency_consensus(
@@ -553,6 +557,12 @@ async def startup_event():
         await cyclone_worker.start()
     except Exception as w_err:
         print(f"[Startup Warning] Could not start cyclone monitoring worker: {w_err}")
+
+    # Initialize satellite telemetry cache non-blockingly (zero startup hang)
+    try:
+        ensure_latest_mosdac_cache(max_age_hours=72.0, non_blocking=True)
+    except Exception as m_err:
+        print(f"[Startup Warning] Could not initialize MOSDAC cache worker: {m_err}")
 
 
 @app.on_event("shutdown")
@@ -1139,7 +1149,7 @@ def execute_orca_core(
         # Step 0: Satellite Pre-Flight Freshness Check (bypassed in FAST_DEMO_MODE)
         if not FAST_DEMO_MODE:
             try:
-                ensure_latest_mosdac_cache(max_age_hours=72.0)
+                ensure_latest_mosdac_cache(max_age_hours=72.0, non_blocking=True)
             except Exception as e:
                 print(f"[Warning] MOSDAC pre-flight check notice: {e}")
 
@@ -1180,6 +1190,15 @@ def execute_orca_core(
             response_data["english_query"] = english_query
             response_data["effective_query"] = english_query
             response_data["show_route"] = False
+            try:
+                from response_validator import validate_orca_response
+                response_data, _ = validate_orca_response(
+                    payload=response_data,
+                    original_query=original_query,
+                    intent="LOCATION_REQUIRED",
+                )
+            except Exception:
+                pass
             return response_data
 
         # Step 2: Ensure UI and MapLibre compatibility fields are populated
@@ -1231,15 +1250,19 @@ def execute_orca_core(
         analyzed_intent = (response_data.get("analyzed_intent") or response_data.get("intent") or "").upper()
         english_q_lower = (english_query or "").lower().strip()
 
+        non_route_intents = (
+            "MARITIME_BOUNDARY", "EEZ", "CYCLONE", "DISASTER", "WEATHER",
+            "OCEAN", "SEA_CONDITIONS", "PFZ", "FISHING", "GENERAL", "GENERAL_MARINE"
+        )
+        has_explicit_route_keyword = (
+            any(k in english_q_lower for k in ["safe route", "give me a route", "route from", "best route", "alternative route", "recommend a route", "sail from", "navigate to", "passage from"])
+            or (re.search(r"\b(navigate|sail|route|passage)\s+to\s+colombo\b", english_q_lower) is not None)
+            or ("route" in english_q_lower and "from " in english_q_lower and " to " in english_q_lower)
+        )
         is_route_intent = (
             analyzed_intent in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")
-            or any(k in english_q_lower for k in ["route", "passage", "sail from", "navigate to", "route to", "waypoint", "to sri lanka"])
-            or (re.search(r"\bnavigate\s+to\s+colombo\b|\bsail\s+to\s+colombo\b|\broute\s+to\s+colombo\b|\bpassage\s+to\s+colombo\b", english_q_lower) is not None)
-            or ("from " in english_q_lower and " to " in english_q_lower)
+            or (has_explicit_route_keyword and analyzed_intent not in non_route_intents)
         )
-        # Exclude boundary/cyclone/disaster intents from being re-classified as route
-        if is_route_intent and analyzed_intent in ("MARITIME_BOUNDARY", "EEZ", "CYCLONE", "DISASTER"):
-            is_route_intent = False
 
         is_cyclone_intent = (
             analyzed_intent == "DISASTER"
@@ -1583,7 +1606,7 @@ def execute_orca_core(
             f_sector = "your coastal operating sector"
 
         fallback_msg = (
-            f"STATUS: DATA_UNAVAILABLE. Telemetry processing encountered an internal error for {f_sector}: {e}. "
+            f"STATUS: DATA_UNAVAILABLE. Telemetry processing is temporarily unavailable for {f_sector}. "
             "Automated safety advice cannot be generated at this time. Please consult official IMD/INCOIS marine broadcasts before departure."
         )
         fallback_advisories = [
@@ -1594,8 +1617,8 @@ def execute_orca_core(
         # Intent-aware fallback navigation/recommendation
         q_check_str = (original_query or user_query or str(query) or "").lower()
         is_route_fallback = (
-            any(k in q_check_str for k in ["route", "destination", "navigate", "bearing", "passage", "waypoint", "sail from", "sail to"])
-            or ("from " in q_check_str and " to " in q_check_str)
+            any(k in q_check_str for k in ["safe route", "give me a route", "route from", "best route", "alternative route", "recommend a route", "sail from", "navigate to", "passage from"])
+            or ("route" in q_check_str and "from " in q_check_str and " to " in q_check_str)
         )
         if is_route_fallback:
             fallback_nav = "Caution: automated route verification unavailable due to processing error."
@@ -1620,7 +1643,7 @@ def execute_orca_core(
             "risk_score": None,
             "show_route": is_route_fallback,
         }
-        return {
+        fallback_payload = {
             "status": "DATA_UNAVAILABLE",
             "reply": localized_fallback,
             "response": localized_fallback,
@@ -1630,6 +1653,31 @@ def execute_orca_core(
             "threat_status": "DATA_UNAVAILABLE",
             "risk_score": None,
             "show_route": is_route_fallback,
+            "recommendation": fallback_nav,
+            "conditions": {
+                "wave_height_m": None,
+                "wind_speed_kmh": None,
+                "wind_direction": None,
+                "sea_condition": "UNKNOWN",
+                "swell_wave_height_m": None,
+                "surface_current_knots": None,
+                "status": "DATA_UNAVAILABLE",
+            },
+            "risk_assessment": {
+                "level": "MODERATE",
+                "score": None,
+                "factors": ["Satellite feed error or pending synchronization"],
+                "status": "DATA_UNAVAILABLE",
+            },
+            "data_quality": {
+                "status": "DATA_UNAVAILABLE",
+                "sources": {
+                    "primary_agency": "ISRO MOSDAC",
+                    "secondary_agency": "Copernicus Marine Service",
+                },
+                "confidence_score": 0.0,
+            },
+            "visualization": None,
             "advisory": fallback_advisory,
             "advisory_text": localized_fallback,
             "advisory_details": fallback_advisory,
@@ -1654,8 +1702,19 @@ def execute_orca_core(
             },
             "success": False,
             "fallback_advisory": localized_fallback,
-            "error": str(e)
+            "error": "INTERNAL_PROCESSING_ERROR",
+            "error_code": "INTERNAL_PROCESSING_ERROR",
         }
+        try:
+            from response_validator import validate_orca_response
+            fallback_payload, _ = validate_orca_response(
+                payload=fallback_payload,
+                original_query=original_query,
+                intent="DATA_UNAVAILABLE",
+            )
+        except Exception:
+            pass
+        return fallback_payload
 
 
 @app.post("/query")
@@ -1795,30 +1854,33 @@ async def process_marine_query(request: QueryRequest, lang: Optional[str] = None
             "Are there any cyclone or rough sea warnings?"
         ])
 
-    orca_response = OrcaResponse(**payload)
-    orca_response.prompt_suggestions = payload.get("prompt_suggestions")
-    orca_response.source_language = payload.get("source_language", detected_lang)
-    orca_response.language_name = payload.get("language_name", SUPPORTED_LANGUAGES.get(detected_lang, "English").capitalize())
-    orca_response.status = payload.get("status", "SUCCESS")
-    orca_response.intent = payload.get("intent")
-    orca_response.visualization = payload.get("visualization")
-    orca_response.conditions = payload.get("conditions")
-    orca_response.recommendation = payload.get("recommendation")
-    orca_response.summary = payload.get("summary")
-    orca_response.data_quality = payload.get("data_quality")
-    orca_response.safe_sea_route = payload.get("safe_sea_route")
-    orca_response.alternative_route = payload.get("alternative_route")
-    reply_val = payload.get("reply") or payload.get("chat_text") or payload.get("message") or ""
-    orca_response.reply = payload.get("reply", reply_val)
-    orca_response.response = payload.get("response", reply_val)
-    orca_response.message = payload.get("message", reply_val)
-    orca_response.chat_text = payload.get("chat_text", reply_val)
-    orca_response.native_advisory_text = payload.get("native_advisory_text", reply_val)
-    orca_response.advisory = payload.get("advisory", {})
-    orca_response.advisory_details = payload.get("advisory_details", {})
-    orca_response.threat_status = payload.get("threat_status", "SAFE")
-    orca_response.risk_score = payload.get("risk_score", 0.0)
-    orca_response.satellite_provenance = payload.get("satellite_provenance", {})
+    try:
+        orca_response = OrcaResponse(**payload)
+        orca_response.prompt_suggestions = payload.get("prompt_suggestions")
+        orca_response.source_language = payload.get("source_language", detected_lang)
+        orca_response.language_name = payload.get("language_name", SUPPORTED_LANGUAGES.get(detected_lang, "English").capitalize())
+        orca_response.status = payload.get("status", "SUCCESS")
+        orca_response.intent = payload.get("intent")
+        orca_response.visualization = payload.get("visualization")
+        orca_response.conditions = payload.get("conditions")
+        orca_response.recommendation = payload.get("recommendation")
+        orca_response.summary = payload.get("summary")
+        orca_response.data_quality = payload.get("data_quality")
+        orca_response.safe_sea_route = payload.get("safe_sea_route")
+        orca_response.alternative_route = payload.get("alternative_route")
+        reply_val = payload.get("reply") or payload.get("chat_text") or payload.get("message") or ""
+        orca_response.reply = payload.get("reply", reply_val)
+        orca_response.response = payload.get("response", reply_val)
+        orca_response.message = payload.get("message", reply_val)
+        orca_response.chat_text = payload.get("chat_text", reply_val)
+        orca_response.native_advisory_text = payload.get("native_advisory_text", reply_val)
+        orca_response.advisory = payload.get("advisory", {})
+        orca_response.advisory_details = payload.get("advisory_details", {})
+        orca_response.threat_status = payload.get("threat_status", "SAFE")
+        orca_response.risk_score = payload.get("risk_score", 0.0)
+        orca_response.satellite_provenance = payload.get("satellite_provenance", {})
+    except Exception as _m_err:
+        print(f"[Model Notice] OrcaResponse schema validation notice: {_m_err}")
 
     # Update in-memory query debounce cache (keyed per distinct query)
     if query_key:

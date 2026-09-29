@@ -142,8 +142,16 @@ def validate_orca_response(
     payload["threat_status"] = threat_status
 
     # 4. Route / Map Visualization Metadata Enforcement
-    is_route_query = norm_intent in ROUTE_INTENTS or any(k in q_lower for k in ["route", "passage", "sail from", "navigate to", "route to", "waypoint", "to sri lanka", "colombo"]) or ("from " in q_lower and " to " in q_lower)
-    is_boundary_query = norm_intent in BOUNDARY_INTENTS or any(k in q_lower for k in ["eez", "border", "imbl", "boundary", "jurisdiction"])
+    is_route_query = (
+        norm_intent in ROUTE_INTENTS
+        or (("from " in q_lower and " to " in q_lower) and not any(b in q_lower for b in ["eez", "boundary", "border"]))
+        or any(k in q_lower for k in ["safe route", "plan route", "route from", "route to", "sail from", "navigate to", "passage from", "waypoint to", "to sri lanka"])
+        or (re.search(r"\b(navigate|sail|route|passage)\s+to\s+colombo\b", q_lower) is not None)
+    )
+    if norm_intent in ("MARITIME_BOUNDARY", "EEZ", "CYCLONE", "DISASTER", "WEATHER", "OCEAN_CONDITIONS", "OCEAN", "WAVES", "PFZ", "FISHING", "CURRENT"):
+        if not (("from " in q_lower and " to " in q_lower) or "safe route" in q_lower or "route to" in q_lower):
+            is_route_query = False
+
     payload["show_route"] = is_route_query
 
     if is_route_query:
@@ -153,21 +161,18 @@ def validate_orca_response(
         payload["visualization"] = {
             "type": "ROUTE",
             "required": True,
-            "coordinates": wps,
-            "clearance_status": route_info.get("clearance_status", "SAFE"),
-        }
-    elif is_boundary_query:
-        payload["visualization"] = {
-            "type": "BOUNDARY",
-            "required": True,
-            "sector": loc_name,
-            "status": "INDIAN_EEZ_VERIFIED",
+            "route": route_info if wps else None,
+            "map_data": {"waypoints": wps} if wps else None,
+            "show_map": True,
+            "show_route": True,
+            "show_pfz": False,
+            "show_hazard": False,
         }
     else:
-        # Ordinary queries MUST NOT attach route visualization
-        if payload.get("visualization") is not None:
-            logs.append("Removed irrelevant visualization from non-route query")
+        # Non-route queries MUST have visualization set to null and clean route fields
         payload["visualization"] = None
+        payload["safe_sea_route"] = None
+        payload["alternative_route"] = None
 
     # 5. Timestamp & Freshness Validation
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -218,11 +223,14 @@ def validate_orca_response(
     # 7. Irrelevant Information Pruning from Text
     chat_text = payload.get("chat_text") or payload.get("reply") or payload.get("native_advisory_text") or ""
     
-    # If weather or cyclone query, strip route boilerplate if accidentally leaked
-    if norm_intent in ("WEATHER", "OCEAN_CONDITIONS", "WAVES", "CYCLONE", "DISASTER"):
+    # Strip any route boilerplate from non-route queries
+    if not is_route_query:
         if "Route analysis complete" in chat_text:
             chat_text = re.sub(r"Route analysis complete\..*?(?=\n\n|$)", "", chat_text).strip()
-            logs.append("Pruned route boilerplate from weather/cyclone advisory text")
+            logs.append("Pruned route boilerplate from non-route advisory text")
+        if "automated route verification unavailable" in chat_text:
+            chat_text = re.sub(r"Caution:\s*automated route verification unavailable due to processing error\.\s*", "", chat_text, flags=re.IGNORECASE).strip()
+            logs.append("Pruned route verification error from non-route advisory text")
 
     payload["reply"] = chat_text
     payload["chat_text"] = chat_text
@@ -243,17 +251,64 @@ def validate_orca_response(
     # 9. Summary & Recommendation Population
     if not payload.get("summary"):
         payload["summary"] = f"Marine conditions evaluated for {loc_name}."
-    if not payload.get("recommendation"):
+    rec_candidate = payload.get("recommendation") or ""
+    if not is_route_query and ("route verification unavailable" in rec_candidate.lower() or "route planning" in rec_candidate.lower()):
+        rec_candidate = ""
+    if not rec_candidate:
         if expected_level in ("CRITICAL", "HIGH"):
             payload["recommendation"] = "Avoid offshore operations; return to nearest sheltered harbor."
         elif expected_level == "MODERATE":
             payload["recommendation"] = "Exercise heightened caution and monitor marine VHF broadcasts."
         else:
             payload["recommendation"] = "Normal operations are reasonable. Continue monitoring changing conditions."
+    else:
+        payload["recommendation"] = rec_candidate
 
-    # 10. Data Quality Flag
-    if not payload.get("data_quality"):
-        payload["data_quality"] = "GOOD"
+    # 10. Conditions Structured Contract (wave_height_m, wind_speed_kmh, wind_direction)
+    conditions_dict = payload.get("conditions")
+    if not isinstance(conditions_dict, dict):
+        conditions_dict = {}
+
+    w_ht = payload.get("wave_height") or (payload.get("advisory") or {}).get("wave_height")
+    wnd_spd = payload.get("wind_speed") or (payload.get("advisory") or {}).get("wind_speed")
+
+    def _parse_metric(v):
+        if v is None or str(v).upper() in ("DATA_UNAVAILABLE", "NONE", "NULL", "N/A"):
+            return None
+        m = re.search(r"[-+]?\d*\.\d+|\d+", str(v))
+        return float(m.group(0)) if m else None
+
+    conditions_dict["wave_height_m"] = _parse_metric(w_ht)
+    conditions_dict["wind_speed_kmh"] = _parse_metric(wnd_spd)
+    conditions_dict["wind_direction"] = payload.get("wind_direction") or (payload.get("advisory") or {}).get("wind_direction")
+    payload["conditions"] = conditions_dict
+
+    # 11. Structured Risk Assessment Contract
+    risk_assessment_dict = payload.get("risk_assessment")
+    if not isinstance(risk_assessment_dict, dict):
+        risk_assessment_dict = {}
+    risk_assessment_dict["level"] = expected_level
+    risk_assessment_dict["score"] = score_val
+    factors = risk_assessment_dict.get("factors") or risk_assessment_dict.get("threat_prioritization") or []
+    risk_assessment_dict["factors"] = factors
+    risk_assessment_dict["status"] = threat_status
+    payload["risk_assessment"] = risk_assessment_dict
+
+    # 12. Structured Data Quality Contract
+    sat_prov = payload.get("satellite_provenance") or {}
+    cache_st = sat_prov.get("cache_status") or ("DATA_UNAVAILABLE" if is_unavail else "FRESH")
+    if cache_st not in ("FRESH", "STALE_CACHE", "DATA_UNAVAILABLE"):
+        cache_st = "FRESH" if str(payload.get("status", "")).upper() == "SUCCESS" else "DATA_UNAVAILABLE"
+
+    sources_list = [p.get("source") for p in payload.get("provenance", []) if isinstance(p, dict) and p.get("source")]
+    payload["data_quality"] = {
+        "status": cache_st,
+        "sources": sources_list or ["ISRO MOSDAC", "Copernicus Marine Service"],
+    }
+
+    # Normalize top-level status casing to success if successful
+    if str(payload.get("status", "")).lower() == "success":
+        payload["status"] = "success"
 
     return payload, logs
 

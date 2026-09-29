@@ -346,9 +346,11 @@ class OrcaResponse(BaseModel):
     recommendation: Optional[str] = Field(None, description="Actionable recommendation")
     provenance: Optional[List[Dict[str, Any]]] = Field(None, description="Detailed data provenance list")
     visualization: Optional[Dict[str, Any]] = Field(None, description="Visualization metadata (ROUTE, BOUNDARY) or null")
-    data_quality: Optional[str] = Field("GOOD", description="Data freshness and quality status")
+    data_quality: Optional[Union[Dict[str, Any], str]] = Field(None, description="Data freshness and quality status")
     timestamp: Optional[str] = Field(None, description="ISO timestamp of response generation")
     model_versions: Optional[Dict[str, Any]] = Field(None, description="Active ML and heuristic model versions")
+    error_code: Optional[str] = Field(None, description="Standardized error code")
+    error: Optional[str] = Field(None, description="Error description or code")
 
     model_config = {"extra": "allow"}
 

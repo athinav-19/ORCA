@@ -24,6 +24,8 @@ import time
 import re
 import datetime
 import subprocess
+import threading
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Dict, Any, List, Tuple
 from dotenv import load_dotenv
@@ -389,8 +391,9 @@ def download_dataset_attempt(
     if not os.path.exists("mdapi.py"):
         return {"success": False, "reason": "MDAPI_NOT_FOUND"}
 
-    # Prepare thread-safe isolated config for dataset_id
-    temp_cfg = f"config_{dataset_id}_{int(time.time() * 1000)}.json"
+    # Prepare thread-safe isolated config for dataset_id inside temp directory
+    temp_dir = tempfile.gettempdir()
+    temp_cfg = os.path.join(temp_dir, f"orca_mosdac_{dataset_id}_{int(time.time() * 1000)}.json")
     try:
         today = datetime.date.today()
         yesterday = today - datetime.timedelta(days=1)
@@ -653,6 +656,7 @@ def ensure_latest_mosdac_cache(
     timeout_sec: Optional[float] = None,
     max_workers: int = 4,
     cache_dir: str = CACHE_DIR,
+    non_blocking: bool = False,
 ) -> Dict[str, Any]:
     """
     Pre-run check: verifies that the latest MOSDAC satellite files for all
@@ -660,6 +664,7 @@ def ensure_latest_mosdac_cache(
     Freshness-aware:
     - If valid cached file is <= max_age_hours, permits STALE_CACHE on download failure.
     - If valid cached file is > max_age_hours, marks DATA_UNAVAILABLE and rejects expired cache.
+    - Non-blocking mode: inspects local cache immediately and runs sync in background daemon thread.
     - Independent concurrent execution prevents slow downloads from stalling the application.
     """
     global _LAST_SYNC_PASS_TIME
@@ -675,6 +680,39 @@ def ensure_latest_mosdac_cache(
         fresh_count = sum(1 for d in _CACHE_REGISTRY.values() if d.get("status") == "FRESH")
         stale_count = sum(1 for d in _CACHE_REGISTRY.values() if d.get("status") == "STALE_CACHE")
         unavail_count = sum(1 for d in _CACHE_REGISTRY.values() if d.get("status") == "DATA_UNAVAILABLE")
+        return {
+            "status": "UP_TO_DATE" if fresh_count == len(SUPPORTED_DATASETS) else ("STALE_CACHE" if stale_count > 0 else "DATA_UNAVAILABLE"),
+            "fresh": fresh_count,
+            "stale": stale_count,
+            "unavailable": unavail_count,
+            "datasets": _CACHE_REGISTRY,
+        }
+
+    # Non-blocking mode: inspect local cache immediately, spawn background sync thread if needed
+    if non_blocking and not force_sync:
+        for ds in SUPPORTED_DATASETS:
+            get_dataset_cache_status(ds, max_age_hours=max_age_hours, cache_dir=cache_dir)
+        fresh_count = sum(1 for d in _CACHE_REGISTRY.values() if d.get("status") == "FRESH")
+        stale_count = sum(1 for d in _CACHE_REGISTRY.values() if d.get("status") == "STALE_CACHE")
+        unavail_count = sum(1 for d in _CACHE_REGISTRY.values() if d.get("status") == "DATA_UNAVAILABLE")
+
+        to_sync_bg = [ds for ds in SUPPORTED_DATASETS if _CACHE_REGISTRY.get(ds, {}).get("status") != "FRESH"]
+        if to_sync_bg and not any(th.name == "mosdac-bg-sync" and th.is_alive() for th in threading.enumerate()):
+            def _async_mosdac_sync():
+                try:
+                    sync_datasets_independently(
+                        datasets=to_sync_bg,
+                        max_age_hours=max_age_hours,
+                        timeout_sec=timeout_sec,
+                        max_workers=max_workers,
+                        cache_dir=cache_dir,
+                        force_sync=False,
+                    )
+                except Exception as _sync_err:
+                    print(f"[MOSDAC Async Sync Warning] {_sync_err}")
+            bg_th = threading.Thread(target=_async_mosdac_sync, daemon=True, name="mosdac-bg-sync")
+            bg_th.start()
+
         return {
             "status": "UP_TO_DATE" if fresh_count == len(SUPPORTED_DATASETS) else ("STALE_CACHE" if stale_count > 0 else "DATA_UNAVAILABLE"),
             "fresh": fresh_count,

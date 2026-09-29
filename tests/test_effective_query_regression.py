@@ -196,6 +196,101 @@ class TestEffectiveQueryRegression(unittest.TestCase):
         self.assertFalse(loc_req_resp.get("show_route", True))
 
 
+    # -------------------------------------------------------------------------
+    # 7. Hazards & IMBL query: "Are there any active weather hazards, cyclones, or IMBL boundary alerts?"
+    # -------------------------------------------------------------------------
+    def test_07_hazards_and_imbl_query(self):
+        query = "Are there any active weather hazards, cyclones, or IMBL boundary alerts?"
+        intent_info = classify_marine_query_intent(query)
+        self.assertIn(intent_info["intent"], ["MARITIME_BOUNDARY", "DISASTER", "CYCLONE", "WEATHER"])
+
+        resp = execute_orca_core(query=query, lat=18.9220, lon=72.8347)
+        self.assertEqual(resp.get("status"), "success")
+        self.assertFalse(resp.get("show_route", True))
+        self.assertIsNone(resp.get("visualization"))
+        self.assertIsNone(resp.get("safe_sea_route"))
+        self.assertEqual(resp.get("original_query"), query)
+        self.assertEqual(resp.get("effective_query"), query)
+        self.assertNotIn("automated route verification unavailable", str(resp.get("reply", "")).lower())
+
+    # -------------------------------------------------------------------------
+    # 8. Safe departure window query: "What is the safe departure window for small craft fishing?"
+    # -------------------------------------------------------------------------
+    def test_08_safe_departure_window_query(self):
+        query = "What is the safe departure window for small craft fishing?"
+        intent_info = classify_marine_query_intent(query)
+        self.assertIn(intent_info["intent"], ["WEATHER", "OCEAN_CONDITIONS", "RISK", "GENERAL_MARINE"])
+
+        resp = execute_orca_core(query=query, lat=18.9220, lon=72.8347)
+        self.assertEqual(resp.get("status"), "success")
+        self.assertFalse(resp.get("show_route", True))
+        self.assertIsNone(resp.get("visualization"))
+        self.assertIsNone(resp.get("safe_sea_route"))
+        self.assertEqual(resp.get("original_query"), query)
+        self.assertEqual(resp.get("effective_query"), query)
+        self.assertNotIn("automated route verification unavailable", str(resp.get("reply", "")).lower())
+
+    # -------------------------------------------------------------------------
+    # 9. Colombo EEZ query: "Is Colombo inside India's EEZ?"
+    # -------------------------------------------------------------------------
+    def test_09_colombo_eez_query(self):
+        query = "Is Colombo inside India's EEZ?"
+        intent_info = classify_marine_query_intent(query)
+        self.assertIn(intent_info["intent"], ["EEZ", "MARITIME_BOUNDARY"])
+
+        resp = execute_orca_core(query=query)
+        self.assertEqual(resp.get("status"), "success")
+        self.assertFalse(resp.get("show_route", True))
+        self.assertIsNone(resp.get("visualization"))
+        self.assertIsNone(resp.get("safe_sea_route"))
+        self.assertEqual(resp.get("original_query"), query)
+        self.assertEqual(resp.get("effective_query"), query)
+        self.assertNotIn("automated route verification unavailable", str(resp.get("reply", "")).lower())
+
+    # -------------------------------------------------------------------------
+    # 10. Android Gson type contract & raw exception safety
+    # -------------------------------------------------------------------------
+    def test_10_android_gson_type_contract_safety(self):
+        """
+        Android OrcaModels.kt maps multiple keys to rawAdvisoryText: String?
+        ["advisory_text", "raw_advisory", "response_text", "text", "reply", "response",
+         "message", "chat_text", "final_response", "native_advisory_text", "fallback_advisory", "reasoning_output"]
+        If ANY of these keys is returned as a dict/object, Gson throws:
+        java.lang.IllegalStateException: Expected a string but was BEGIN_OBJECT.
+        Also recommendation, error, status, threat_status, intent must be str or None.
+        """
+        string_keys_to_verify = [
+            "reply", "response", "message", "chat_text", "native_advisory_text",
+            "advisory_text", "final_response", "reasoning_output",
+            "recommendation", "status", "threat_status"
+        ]
+
+        # Test normal query
+        resp_normal = execute_orca_core(query="How is the weather near Mumbai?")
+        for k in string_keys_to_verify:
+            val = resp_normal.get(k)
+            self.assertTrue(val is None or isinstance(val, str),
+                            f"Key '{k}' must be string or None, got {type(val)}")
+
+        # Test error fallback response directly
+        resp_err = execute_orca_core(query="[SIMULATE_INTERNAL_ERROR_TEST]")
+        for k in string_keys_to_verify:
+            val = resp_err.get(k)
+            self.assertTrue(val is None or isinstance(val, str),
+                            f"In error fallback, key '{k}' must be string or None, got {type(val)}")
+
+        # Verify no raw Python tracebacks or NameError in user-facing reply
+        user_reply = resp_err.get("reply", "")
+        self.assertNotIn("NameError", user_reply)
+        self.assertNotIn("Traceback", user_reply)
+        self.assertNotIn("line ", user_reply)
+
+        # Verify structured conditions and risk assessment exist
+        self.assertIsInstance(resp_err.get("conditions"), dict)
+        self.assertIsInstance(resp_err.get("risk_assessment"), dict)
+        self.assertIsInstance(resp_err.get("data_quality"), dict)
+
+
 if __name__ == "__main__":
     unittest.main()
 

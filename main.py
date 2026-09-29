@@ -646,10 +646,10 @@ class ManagerAgent:
         # JSON output configuration
         self.generation_config = {"response_mime_type": "application/json"}
 
-        # Automatic ISRO MOSDAC cache freshness check
+        # Automatic ISRO MOSDAC cache freshness check (non-blocking)
         try:
             from shadow_cache_worker import ensure_latest_mosdac_cache
-            ensure_latest_mosdac_cache(max_age_hours=72.0)
+            ensure_latest_mosdac_cache(max_age_hours=72.0, non_blocking=True)
         except Exception:
             pass
 
@@ -1893,7 +1893,7 @@ if __name__ == "__main__":
     try:
         from shadow_cache_worker import ensure_latest_mosdac_cache
         print("[MOSDAC Pre-Flight Check] Verifying latest satellite files...")
-        ensure_latest_mosdac_cache(max_age_hours=72.0)
+        ensure_latest_mosdac_cache(max_age_hours=72.0, non_blocking=True)
     except Exception as cache_err:
         print(f"[MOSDAC Pre-Flight Notice] Cache check completed with note: {cache_err}")
 
