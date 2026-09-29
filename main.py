@@ -118,6 +118,11 @@ def classify_marine_query_intent(query_text: str) -> Dict[str, Any]:
     - GREETING: conversational greetings and capability questions
     """
     q = (query_text or "").lower().strip()
+    # Normalize common speech-to-text transcription errors in coastal maritime context
+    # e.g., "wheat there in mumbai" -> "weather in mumbai", "wheat" -> "weather"
+    q = re.sub(r"\bwheat\s+there\b", "weather", q)
+    q = re.sub(r"\bwheat\b(?=.*\b(?:port|coast|sea|near|mumbai|chennai|kochi|goa|harbor|harbour|weather|condition|waves)\b)", "weather", q)
+    q = re.sub(r"\b(how\s+is\s+the|what\s+is\s+the)\s+wheat\b", r"\1 weather", q)
 
     # 0. Conversational greeting check
     greeting_words = {
@@ -254,7 +259,7 @@ def classify_marine_query_intent(query_text: str) -> Dict[str, Any]:
     # 6. WEATHER / METEOROLOGY
     weather_keywords = [
         "weather", "wind", "rain", "rainfall", "temperature", "forecast", "cloud",
-        "precipitation", "gust", "fog", "visibility", "pressure", "barometer"
+        "precipitation", "gust", "fog", "visibility", "pressure", "barometer", "wheat there"
     ]
     if any(k in q for k in weather_keywords):
         return {
