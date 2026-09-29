@@ -294,8 +294,8 @@ class QueryRequest(BaseModel):
 
 class AdvisoryResponse(BaseModel):
     recommendation: Optional[str] = Field("Safe to proceed. Direct corridor to PFZ Alpha open.", description="Card recommendation text")
-    wave_height: Optional[str] = Field("1.2m - 1.4m", description="Wave height")
-    wind_speed: Optional[str] = Field("14 km/h SW", description="Wind speed")
+    wave_height: Optional[str] = Field(None, description="Wave height")
+    wind_speed: Optional[str] = Field(None, description="Wind speed")
     key_advisories: Optional[List[str]] = Field(default_factory=lambda: [
         "🎯 Target: PFZ Hotspot",
         "🐟 High-Yield Catch: Tuna, Mackerel",
@@ -304,9 +304,10 @@ class AdvisoryResponse(BaseModel):
         "☀️ INSAT-3DR Solar: Auxiliary endurance verified"
     ])
     chat_text: str = Field("", description="Main conversational text advisory for display and speech")
-    threat_status: Optional[str] = Field("SAFE", description="Evaluated threat status: SAFE, CAUTION, NO-GO")
-    risk_score: Optional[float] = Field(16.8, description="Evaluated composite risk score")
+    threat_status: Optional[str] = Field(None, description="Evaluated threat status: SAFE, CAUTION, NO-GO")
+    risk_score: Optional[float] = Field(None, description="Evaluated composite risk score")
     native_advisory_text: Optional[str] = Field(None, description="Advisory text translated into regional language")
+    show_route: Optional[bool] = Field(False, description="Flag indicating whether to display navigation route")
 
     model_config = {"extra": "allow"}
 
@@ -320,14 +321,17 @@ class OrcaResponse(BaseModel):
     chat_text: Optional[str] = Field(None, description="Top-level conversational advisory text")
     advisory: Optional[Union[Dict[str, Any], AdvisoryResponse, str]] = Field(None, description="Structured advisory object or string")
     advisory_details: Optional[Any] = Field(None, description="Structured advisory object")
-    threat_status: Optional[str] = Field("SAFE", description="Evaluated threat status: SAFE, CAUTION, NO-GO")
-    risk_score: Optional[float] = Field(16.8, description="Evaluated composite risk score")
+    threat_status: Optional[str] = Field(None, description="Evaluated threat status: SAFE, CAUTION, NO-GO")
+    risk_score: Optional[float] = Field(None, description="Evaluated composite risk score")
     native_advisory_text: Optional[str] = Field(None, description="Top-level native advisory text")
     session_id: Optional[str] = Field(None, description="Session ID")
     source_language: Optional[str] = Field(None, description="Source or preferred language code")
     language_name: Optional[str] = Field(None, description="Name of language")
     risk_assessment: Optional[Dict[str, Any]] = Field(None, description="Composite risk assessment")
     safe_sea_route: Optional[Dict[str, Any]] = Field(None, description="Navigational waypoints and clearance")
+    show_route: Optional[bool] = Field(False, description="Flag indicating whether to display navigation route on client map")
+    original_query: Optional[str] = Field(None, description="Original raw user query")
+    effective_query: Optional[str] = Field(None, description="Internal effective English query")
     green_marine_energy: Optional[Dict[str, Any]] = Field(None, description="Solar irradiance and zero-emission stats")
     prompt_suggestions: Optional[List[str]] = Field(None, description="Suggested prompt follow-ups")
     satellite_provenance: Optional[Dict[str, Any]] = Field(None, description="Dual-agency satellite telemetry provenance")

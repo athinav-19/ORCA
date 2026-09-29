@@ -160,27 +160,27 @@ def classify_marine_query_intent(query_text: str) -> Dict[str, Any]:
             ]
         }
 
-    # 2. DEPARTURE WINDOW & OPERATIONAL SAILING SAFETY (Evaluated before route passage unless explicit destination is given)
-    departure_keywords = [
-        "departure window", "safe departure", "departure time", "when to depart",
-        "when can i sail", "safe to sail", "safe to depart", "small craft departure",
-        "sailing window", "safe departure window", "safe to cast off", "departure advisory"
+    # 1.5 SAFE DEPARTURE WINDOW (Operational sailing weather)
+    departure_window_keywords = [
+        "departure window", "departure time", "safe departure", "departure timing",
+        "when can i sail", "when to sail", "sailing window"
     ]
-    if any(k in q for k in departure_keywords) and not loc_extracted.get("destination"):
+    if any(k in q for k in departure_window_keywords):
         return {
             "intent": "WEATHER",
-            "urgency": "MEDIUM",
+            "urgency": "LOW",
             "plan": [
-                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check sustained wind speeds, storm gusts, and operational departure window.", "expected_output_format": "TEXT_SUMMARY"},
-                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check significant wave height and operational sea conditions for small craft.", "expected_output_format": "TEXT_SUMMARY"},
-                {"agent_name": "DISASTER_AGENT", "task_instructions": "Check active tropical cyclones, storm squalls, and hazard warnings.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check surface wind speed, gusts, visibility, and departure conditions.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check swell wave height and ocean surface state.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "DISASTER_AGENT", "task_instructions": "Check active cyclone or squall warnings.", "expected_output_format": "TEXT_SUMMARY"},
             ]
         }
 
-    # 3. ROUTE / SAFE_ROUTE / ROUTE_PLANNING
+    # 2. ROUTE / SAFE_ROUTE / ROUTE_PLANNING
     is_route_passage = (
         has_explicit_route
-        or any(k in q for k in ["to sri lanka", "to colombo"])
+        or ("to sri lanka" in q)
+        or (re.search(r"\bnavigate\s+to\s+colombo\b|\bsail\s+to\s+colombo\b|\broute\s+to\s+colombo\b|\bpassage\s+to\s+colombo\b", q) is not None)
     )
     if is_route_passage:
         sub_intent = "SAFE_ROUTE" if "safe" in q else "ROUTE_PLANNING"
@@ -242,27 +242,19 @@ def classify_marine_query_intent(query_text: str) -> Dict[str, Any]:
         }
 
     # 5. WAVES & CURRENTS & OCEAN_CONDITIONS
+    ocean_keywords = [
+        "sea surface temperature", "sst", "ocean temperature", "sea condition",
+        "sea conditions", "ocean condition", "ocean conditions", "ocean state",
+        "marine condition", "marine conditions"
+    ]
     wave_keywords = ["wave", "waves", "swell", "sea state", "rough sea", "calm sea", "wave height"]
-    current_keywords = ["current", "currents", "geostrophic", "tidal current", "drift"]
-    ocean_keywords = ["sea surface temperature", "sst", "ocean temperature", "sea condition", "sea conditions", "ocean condition", "ocean conditions", "ocean state"]
+    current_keywords = [
+        "ocean current", "ocean currents", "tidal current", "tidal currents",
+        "water current", "surface current", "current velocity", "current direction", "current speed",
+        "geostrophic", "drift", "currents"
+    ]
 
-    if any(k in q for k in current_keywords):
-        return {
-            "intent": "CURRENT",
-            "urgency": "LOW",
-            "plan": [
-                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check ocean current velocity and direction.", "expected_output_format": "TEXT_SUMMARY"},
-            ]
-        }
-    if any(k in q for k in wave_keywords):
-        return {
-            "intent": "WAVES",
-            "urgency": "LOW",
-            "plan": [
-                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check significant wave height (SWH), swell direction, and sea state roughness.", "expected_output_format": "TEXT_SUMMARY"},
-                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check surface wind speed driving wind waves.", "expected_output_format": "TEXT_SUMMARY"},
-            ]
-        }
+    # Evaluate ocean/sea conditions first
     if any(k in q for k in ocean_keywords):
         return {
             "intent": "OCEAN_CONDITIONS",
@@ -270,6 +262,30 @@ def classify_marine_query_intent(query_text: str) -> Dict[str, Any]:
             "plan": [
                 {"agent_name": "OCEAN_AGENT", "task_instructions": "Check sea surface temperature (SST) and physical oceanographic state.", "expected_output_format": "TEXT_SUMMARY"},
                 {"agent_name": "WEATHER_AGENT", "task_instructions": "Check surface meteorological parameters.", "expected_output_format": "TEXT_SUMMARY"},
+            ]
+        }
+
+    # Evaluate ocean water currents (distinguish from temporal adjective "current")
+    is_water_current = (
+        any(k in q for k in current_keywords)
+        or bool(re.search(r"\bcurrent\b(?!\s+(?:sea|weather|condition|conditions|swell|wave|waves|wind|state|situation|telemetry|forecast|time|status))", q))
+    )
+    if is_water_current:
+        return {
+            "intent": "CURRENT",
+            "urgency": "LOW",
+            "plan": [
+                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check ocean current velocity and direction.", "expected_output_format": "TEXT_SUMMARY"},
+            ]
+        }
+
+    if any(k in q for k in wave_keywords):
+        return {
+            "intent": "WAVES",
+            "urgency": "LOW",
+            "plan": [
+                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check significant wave height (SWH), swell direction, and sea state roughness.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check surface wind speed driving wind waves.", "expected_output_format": "TEXT_SUMMARY"},
             ]
         }
 
@@ -760,6 +776,7 @@ class ManagerAgent:
         """
         Parses either a JSON string, a dictionary matching the mobile schema,
         or a legacy plain string into a standardized mobile payload dictionary.
+        Preserves original_query and creates effective_query following language processing.
         """
         if isinstance(input_data, str):
             trimmed = input_data.strip()
@@ -767,7 +784,12 @@ class ManagerAgent:
                 try:
                     parsed = json.loads(trimmed)
                     if isinstance(parsed, dict) and (
-                        "session_id" in parsed or "device_telemetry" in parsed or "user_input" in parsed
+                        "session_id" in parsed
+                        or "device_telemetry" in parsed
+                        or "user_input" in parsed
+                        or "query" in parsed
+                        or "query_text" in parsed
+                        or "raw_text" in parsed
                     ):
                         input_data = parsed
                 except Exception:
@@ -781,79 +803,117 @@ class ManagerAgent:
                     datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 )
             )
-            user_context = input_data.get("user_context") or {}
-            raw_device_telemetry = input_data.get("device_telemetry")
-            device_telemetry = raw_device_telemetry if isinstance(raw_device_telemetry, dict) else None
-            user_input = input_data.get("user_input") or {}
+            user_context = input_data.get("user_context", {})
+            if not isinstance(user_context, dict):
+                user_context = {}
+            raw_telemetry = input_data.get("device_telemetry")
+            device_telemetry = raw_telemetry if isinstance(raw_telemetry, dict) else {}
+            raw_user_input = input_data.get("user_input")
+            user_input = raw_user_input if isinstance(raw_user_input, dict) else {}
 
-            raw_text = user_input.get("raw_text")
-            raw_audio_base64 = user_input.get("raw_audio_base64")
-            input_type = str(user_input.get("input_type", "TEXT" if raw_text else "AUDIO")).upper()
+            raw_text = (
+                user_input.get("raw_text")
+                or input_data.get("raw_text")
+                or input_data.get("query")
+                or input_data.get("query_text")
+                or input_data.get("text")
+                or ""
+            )
+            raw_audio_base64 = user_input.get("raw_audio_base64") or input_data.get("raw_audio_base64")
+            input_type = str(
+                user_input.get("input_type")
+                or input_data.get("input_type")
+                or ("TEXT" if raw_text else ("AUDIO" if raw_audio_base64 else "TEXT"))
+            ).upper()
 
-            raw_lat = device_telemetry.get("latitude") if device_telemetry else None
-            raw_lon = device_telemetry.get("longitude") if device_telemetry else None
+            raw_lat = device_telemetry.get("latitude") if device_telemetry else (input_data.get("latitude", input_data.get("lat")))
+            raw_lon = device_telemetry.get("longitude") if device_telemetry else (input_data.get("longitude", input_data.get("lon")))
             lat = float(raw_lat) if raw_lat is not None else None
             lon = float(raw_lon) if raw_lon is not None else None
 
-            query_text = ""
-            if raw_text and str(raw_text).strip():
-                query_text = str(raw_text).strip()
+            # 1. Capture exact original query
+            original_query = (
+                user_input.get("original_query")
+                or user_context.get("original_query")
+                or input_data.get("original_query")
+                or (str(raw_text).strip() if raw_text else "")
+            ).strip()
+
+            # 2. Determine effective_query via language processing / translation if required
+            given_effective = (
+                input_data.get("effective_query")
+                or user_input.get("effective_query")
+                or user_input.get("english_query")
+                or input_data.get("english_query")
+            )
+
+            if given_effective and str(given_effective).strip():
+                effective_query = str(given_effective).strip()
+            elif original_query:
+                detected_lang = detect_language_from_text(original_query)
+                if detected_lang != "en":
+                    try:
+                        translated = IndicTranslationService.translate_to_english(original_query, detected_lang)
+                        effective_query = str(translated).strip() if (translated and str(translated).strip()) else original_query
+                    except Exception:
+                        effective_query = original_query
+                else:
+                    effective_query = original_query
             elif input_type == "AUDIO" and raw_audio_base64:
                 if lat is not None and lon is not None:
-                    query_text = (
-                        f"Voice Request: Identify optimal fishing zones and maritime sea safety near coordinates ({lat:.4f}, {lon:.4f})"
-                    )
+                    effective_query = f"Voice Request: Identify optimal fishing zones and maritime sea safety near coordinates ({lat:.4f}, {lon:.4f})"
                 else:
-                    query_text = "Voice Request: Identify optimal fishing zones and maritime sea safety"
+                    effective_query = "Voice Request: Identify optimal fishing zones and maritime sea safety"
             else:
                 if lat is not None and lon is not None:
-                    query_text = (
-                        f"Where can I go fishing today near coordinates ({lat:.4f}, {lon:.4f}) and is it safe to sail?"
-                    )
+                    effective_query = f"Where can I go fishing today near coordinates ({lat:.4f}, {lon:.4f}) and is it safe to sail?"
                 else:
-                    query_text = "Where can I go fishing today and is it safe to sail?"
+                    effective_query = "Where can I go fishing today and is it safe to sail?"
 
-            gps_acc = device_telemetry.get("gps_accuracy_meters") if device_telemetry else None
-            spd = device_telemetry.get("speed_knots") if device_telemetry else None
-            hdg = device_telemetry.get("heading_degrees") if device_telemetry else None
-
-            if lat is not None and lon is not None:
-                telemetry_state = {
-                    "available": True,
-                    "source": "USER_DEVICE",
-                    "latitude": lat,
-                    "longitude": lon,
-                    "gps_accuracy_meters": float(gps_acc) if gps_acc is not None else 4.5,
-                    "speed_knots": float(spd) if spd is not None else 0.0,
-                    "heading_degrees": float(hdg) if hdg is not None else 0.0,
-                }
-            else:
-                telemetry_state = {
-                    "available": False,
-                    "source": "USER_DEVICE",
-                    "reason": "NO_TELEMETRY_PROVIDED",
-                    "latitude": None,
-                    "longitude": None,
-                    "gps_accuracy_meters": float(gps_acc) if gps_acc is not None else None,
-                    "speed_knots": float(spd) if spd is not None else 0.0,
-                    "heading_degrees": float(hdg) if hdg is not None else 0.0,
-                }
+            if not original_query:
+                original_query = effective_query
 
             return {
                 "session_id": session_id,
                 "client_timestamp": client_timestamp,
                 "user_context": user_context,
-                "device_telemetry": telemetry_state,
+                "device_telemetry": {
+                    "latitude": lat,
+                    "longitude": lon,
+                    "gps_accuracy_meters": float(device_telemetry.get("gps_accuracy_meters", 4.5)) if device_telemetry.get("gps_accuracy_meters") is not None else 4.5,
+                    "speed_knots": float(device_telemetry.get("speed_knots", 0.0)) if device_telemetry.get("speed_knots") is not None else 0.0,
+                    "heading_degrees": float(device_telemetry.get("heading_degrees", 0.0)) if device_telemetry.get("heading_degrees") is not None else 0.0,
+                },
                 "user_input": {
                     "input_type": input_type,
-                    "raw_text": raw_text,
+                    "raw_text": raw_text or original_query,
                     "raw_audio_base64": raw_audio_base64,
+                    "original_query": original_query,
+                    "effective_query": effective_query,
+                    "english_query": effective_query,
                 },
-                "effective_query": query_text,
+                "original_query": original_query,
+                "effective_query": effective_query,
+                "query": original_query,
             }
 
         # Legacy plain string query
         query_str = str(input_data or "").strip()
+        original_query = query_str
+        if original_query:
+            detected_lang = detect_language_from_text(original_query)
+            if detected_lang != "en":
+                try:
+                    translated = IndicTranslationService.translate_to_english(original_query, detected_lang)
+                    effective_query = str(translated).strip() if (translated and str(translated).strip()) else original_query
+                except Exception:
+                    effective_query = original_query
+            else:
+                effective_query = original_query
+        else:
+            effective_query = "Where can I go fishing today and is it safe to sail?"
+            original_query = effective_query
+
         return {
             "session_id": "sess_default",
             "client_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -867,10 +927,15 @@ class ManagerAgent:
             },
             "user_input": {
                 "input_type": "TEXT",
-                "raw_text": query_str,
+                "raw_text": original_query,
                 "raw_audio_base64": None,
+                "original_query": original_query,
+                "effective_query": effective_query,
+                "english_query": effective_query,
             },
-            "effective_query": query_str,
+            "original_query": original_query,
+            "effective_query": effective_query,
+            "query": original_query,
         }
 
     def analyze_query(self, query: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -884,6 +949,15 @@ class ManagerAgent:
         client_timestamp = mobile_payload["client_timestamp"]
         telemetry = mobile_payload["device_telemetry"]
         user_context = mobile_payload["user_context"]
+
+        # Define effective_query and original_query BEFORE location extraction
+        original_query = mobile_payload.get("original_query", "")
+        effective_query = mobile_payload.get("effective_query", "")
+        if not effective_query:
+            effective_query = original_query if original_query else "Where can I go fishing today and is it safe to sail?"
+        if not original_query:
+            original_query = effective_query
+
         lat = telemetry.get("latitude") if isinstance(telemetry, dict) else None
         lon = telemetry.get("longitude") if isinstance(telemetry, dict) else None
         gps_str = f"{lat:.4f},{lon:.4f}" if (lat is not None and lon is not None) else None
@@ -928,6 +1002,7 @@ class ManagerAgent:
             session_history.append(
                 {
                     "query": effective_query,
+                    "original_query": original_query,
                     "intent": intent_val,
                     "locations": locs_val,
                     "location": locs_val[0] if locs_val else None,
@@ -950,6 +1025,9 @@ class ManagerAgent:
                 "time_entities": ["today"],
                 "execution_plan": deterministic_plan,
                 "urgency_level": deterministic_urgency,
+                "original_query": original_query,
+                "effective_query": effective_query,
+                "query": original_query or effective_query,
             }
 
         # Format session-specific conversational memory context
@@ -1141,14 +1219,19 @@ class ManagerAgent:
                 "time_entities": time_entities,
                 "execution_plan": validated_plan,
                 "urgency_level": urgency,
+                "original_query": original_query,
+                "effective_query": effective_query,
+                "query": original_query or effective_query,
             }
 
             # Update session-specific conversational memory
             session_history.append(
                 {
                     "query": effective_query,
+                    "original_query": original_query,
                     "intent": intent,
                     "locations": location_entities,
+                    "location": location_entities[0] if location_entities else None,
                 }
             )
             self.sessions[session_id] = session_history[-5:]
@@ -1567,10 +1650,18 @@ def process_marine_request(
         else:
             loc_req_msg_native = loc_req_msg
 
+        loc_req_intent_info = classify_marine_query_intent(english_text)
+        loc_req_intent = loc_req_intent_info.get("intent", "GENERAL_MARINE")
+
         return {
             "success": False,
             "status": "LOCATION_REQUIRED",
             "message": loc_req_msg_native,
+            "reply": loc_req_msg_native,
+            "response": loc_req_msg_native,
+            "intent": loc_req_intent,
+            "analyzed_intent": loc_req_intent,
+            "show_route": False,
             "supported_locations": [
                 "Mumbai", "Chennai", "Kochi", "Goa", "Tuticorin", "Visakhapatnam",
                 "Mangalore", "Kandla", "Porbandar", "Paradip", "Haldia", "Kolkata", "Kanyakumari", "Rameswaram"
@@ -1582,6 +1673,9 @@ def process_marine_request(
             "input_type": "AUDIO" if is_voice else "TEXT",
             "transcribed_text": transcribed_text,
             "english_query": english_text,
+            "effective_query": english_text,
+            "original_query": original_user_query or raw_text or english_text,
+            "query": original_user_query or raw_text or english_text,
             "source_language_code": source_lang,
             "map_status": "LOCATION_REQUIRED",
             "recommended_coordinates": "",
@@ -1614,10 +1708,15 @@ def process_marine_request(
         "client_timestamp": client_timestamp,
         "user_context": user_context,
         "device_telemetry": device_telemetry,
+        "original_query": original_user_query,
+        "effective_query": english_text,
         "user_input": {
             "input_type": "TEXT",
-            "raw_text": english_text
-        }
+            "raw_text": english_text,
+            "original_query": original_user_query,
+            "effective_query": english_text,
+            "english_query": english_text,
+        },
     }
 
     orchestration_result = manager.analyze_query(manager_payload)
@@ -1715,7 +1814,6 @@ def process_marine_request(
         normalized_query=normalized_query,
     )
     final_payload["analyzed_intent"] = orchestration_result.get("analyzed_intent")
-    final_payload["intent"] = orchestration_result.get("analyzed_intent")
     final_payload["execution_plan"] = plan
     final_payload["agents_used"] = [s.get("agent_name") for s in plan if s.get("agent_name")]
 
@@ -1747,6 +1845,12 @@ def process_marine_request(
     final_payload["audio_payload_base64"] = audio_payload_base64
 
     # Step 8: Package final multi-modal payload matching ORCA schema
+    is_route_intent = (
+        (orchestration_result.get("analyzed_intent") or "").upper() in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")
+        or any(k in english_text.lower() for k in ["route", "passage", "sail from", "navigate to", "route to", "waypoint", "to sri lanka", "colombo"])
+        or ("from " in english_text.lower() and " to " in english_text.lower())
+    )
+
     final_payload["success"] = True
     final_payload["session_id"] = session_id
     final_payload["client_timestamp"] = client_timestamp
@@ -1755,9 +1859,11 @@ def process_marine_request(
     final_payload["input_type"] = "AUDIO" if is_voice else "TEXT"
     final_payload["transcribed_text"] = transcribed_text
     final_payload["english_query"] = english_text
+    final_payload["effective_query"] = english_text
     final_payload["source_language_code"] = detected_lang
     final_payload["detected_language"] = detected_lang
     final_payload["original_query"] = original_user_query or raw_text or english_text
+    final_payload["query"] = original_user_query or raw_text or english_text
     final_payload["reasoning_output"] = english_advisory
     final_payload["final_response"] = native_advisory
     final_payload["reply"] = native_advisory
@@ -1766,6 +1872,8 @@ def process_marine_request(
     final_payload["location_context"] = location_context.to_dict()
     final_payload["origin"] = origin_info
     final_payload["destination"] = dest_info
+    final_payload["intent"] = orchestration_result.get("analyzed_intent")
+    final_payload["show_route"] = is_route_intent
     final_payload["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     return final_payload

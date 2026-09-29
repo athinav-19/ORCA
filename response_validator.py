@@ -17,6 +17,7 @@ CANONICAL_INTENTS = {
     "FISHING",
     "CYCLONE",
     "DISASTER",
+    "ROUTE",
     "SAFE_ROUTE",
     "ROUTE_PLANNING",
     "MARITIME_BOUNDARY",
@@ -71,16 +72,20 @@ def validate_orca_response(
     q_lower = (original_query or payload.get("original_query") or payload.get("query") or "").lower()
 
     # 1. Intent Validation & Normalization
-    raw_intent = intent or payload.get("intent") or payload.get("analyzed_intent") or "GENERAL_MARINE"
+    raw_intent = payload.get("intent") or intent or payload.get("analyzed_intent") or "GENERAL_MARINE"
     raw_intent_up = str(raw_intent).upper()
-    if raw_intent_up not in CANONICAL_INTENTS:
+    if raw_intent_up in ROUTE_INTENTS:
+        norm_intent = "ROUTE"
+    elif "cyclone" in q_lower or raw_intent_up == "CYCLONE":
+        norm_intent = "CYCLONE"
+    elif raw_intent_up not in CANONICAL_INTENTS:
         # Fallback mapping
         if any(k in raw_intent_up for k in ["CYCLONE", "DISASTER", "STORM"]):
             norm_intent = "CYCLONE" if "CYCLONE" in raw_intent_up else "DISASTER"
         elif any(k in raw_intent_up for k in ["PFZ", "FISH"]):
             norm_intent = "PFZ" if "PFZ" in raw_intent_up else "FISHING"
         elif any(k in raw_intent_up for k in ["ROUTE", "PASSAGE", "NAVIGAT"]):
-            norm_intent = "ROUTE_PLANNING"
+            norm_intent = "ROUTE"
         elif any(k in raw_intent_up for k in ["WAVE", "SWELL"]):
             norm_intent = "WAVES"
         elif any(k in raw_intent_up for k in ["CURRENT"]):
@@ -113,12 +118,18 @@ def validate_orca_response(
     risk_data = payload.get("risk_assessment") or {}
     threat_status = payload.get("threat_status") or risk_data.get("status") or "SAFE"
     raw_score = risk_data.get("risk_score") or payload.get("risk_score")
-    try:
-        score_val = float(raw_score) if raw_score is not None and str(raw_score).upper() != "N/A" else 16.8
-    except (ValueError, TypeError):
-        score_val = 16.8
+    is_unavail = threat_status == "DATA_UNAVAILABLE" or payload.get("status") in ("DATA_UNAVAILABLE", "LOCATION_REQUIRED")
+    
+    if is_unavail or raw_score is None or str(raw_score).upper() == "N/A":
+        score_val = None
+        expected_level = "INDETERMINATE" if is_unavail else "LOW"
+    else:
+        try:
+            score_val = float(raw_score)
+        except (ValueError, TypeError):
+            score_val = None
+        expected_level = map_score_to_risk_level(score_val if score_val is not None else 0.0, threat_status)
 
-    expected_level = map_score_to_risk_level(score_val, threat_status)
     current_risk = payload.get("risk") or {}
     if not isinstance(current_risk, dict):
         current_risk = {}
@@ -133,6 +144,7 @@ def validate_orca_response(
     # 4. Route / Map Visualization Metadata Enforcement
     is_route_query = norm_intent in ROUTE_INTENTS or any(k in q_lower for k in ["route", "passage", "sail from", "navigate to", "route to", "waypoint", "to sri lanka", "colombo"]) or ("from " in q_lower and " to " in q_lower)
     is_boundary_query = norm_intent in BOUNDARY_INTENTS or any(k in q_lower for k in ["eez", "border", "imbl", "boundary", "jurisdiction"])
+    payload["show_route"] = is_route_query
 
     if is_route_query:
         alt_route = payload.get("alternative_route") or {}

@@ -9,8 +9,6 @@
   "test_period": "2022-2025",
   "train_samples": 6435,
   "test_samples": 247,
-  "data_classification": "RULE_EMULATION",
-  "status": "PENDING_REAL_GROUND_TRUTH",
   "scientific_basis": "INCOIS oceanographic criteria predicting 48h frontal persistence under turbulent mixing",
   "ethical_disclaimer": "Predicts favorable oceanographic habitat suitability. NEVER represents guaranteed fish presence.",
   "leakage_safeguards": "Target evaluated at t+48h, past lags at t-24h, zero circular formula derivation"

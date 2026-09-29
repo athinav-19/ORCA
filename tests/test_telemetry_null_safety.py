@@ -33,13 +33,13 @@ from main import (
     process_marine_request,
 )
 from server import execute_orca_core
-from decision_engine import RiskAnalysisAgent
+from decision_engine import DecisionEngine
 
 
 class TestTelemetryNullSafety(unittest.TestCase):
 
     def setUp(self):
-        self.risk_agent = RiskAnalysisAgent()
+        self.engine = DecisionEngine()
         self.manager = ManagerAgent()
 
     # -------------------------------------------------------------------------
@@ -56,7 +56,7 @@ class TestTelemetryNullSafety(unittest.TestCase):
             }
         }
         try:
-            metrics_1 = self.risk_agent._extract_metrics(agg_data_1)
+            metrics_1 = self.engine._extract_metrics(agg_data_1)
             self.assertIsInstance(metrics_1, dict)
             self.assertIn("wind_speed_kmph", metrics_1)
             self.assertIn("visibility_km", metrics_1)
@@ -73,7 +73,7 @@ class TestTelemetryNullSafety(unittest.TestCase):
             "device_telemetry": None,
         }
         try:
-            metrics_2 = self.risk_agent._extract_metrics(agg_data_2)
+            metrics_2 = self.engine._extract_metrics(agg_data_2)
             self.assertIsInstance(metrics_2, dict)
         except Exception as e:
             self.fail(f"_extract_metrics crashed on all-None agents: {e}")
@@ -89,7 +89,7 @@ class TestTelemetryNullSafety(unittest.TestCase):
             }
         }
         try:
-            metrics_3 = self.risk_agent._extract_metrics(agg_data_3)
+            metrics_3 = self.engine._extract_metrics(agg_data_3)
             self.assertIsInstance(metrics_3, dict)
         except Exception as e:
             self.fail(f"_extract_metrics crashed on disaster_out with None fields: {e}")
@@ -102,7 +102,8 @@ class TestTelemetryNullSafety(unittest.TestCase):
     # -------------------------------------------------------------------------
     def test_02_query_telemetry_none_no_location(self):
         query = "What is the safe departure window for small craft fishing?"
-        resp = execute_orca_core(query=query, lat=None, lon=None)
+        # Use a unique session_id to prevent bleed from prior tests that set GPS coordinates
+        resp = execute_orca_core(query=query, lat=None, lon=None, session_id="test_02_isolation")
         
         self.assertIsInstance(resp, dict)
         self.assertEqual(resp.get("status"), "LOCATION_REQUIRED")
@@ -111,6 +112,7 @@ class TestTelemetryNullSafety(unittest.TestCase):
         self.assertNotIn("nonetype", str(resp).lower())
         self.assertNotIn("internal error", str(resp).lower())
         print("[PASS] Test 2: Query with telemetry=None and no location returns structured LOCATION_REQUIRED.")
+
 
     # -------------------------------------------------------------------------
     # Scenario 3: Query with telemetry=None but EXPLICIT query location

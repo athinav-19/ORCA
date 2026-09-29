@@ -1114,13 +1114,27 @@ def execute_orca_core(
         resolved_p = resolve_persona(persona)
         persona_val = resolved_p.value if resolved_p else None
 
-        telemetry_dict = {
-            "latitude": lat,
-            "longitude": lon,
-            "speed_knots": speed_knots,
-            "heading_degrees": heading_degrees,
-            "gps_accuracy_meters": gps_accuracy_meters,
-        }
+        if lat is not None and lon is not None:
+            telemetry_dict = {
+                "available": True,
+                "source": "USER_DEVICE",
+                "latitude": float(lat),
+                "longitude": float(lon),
+                "speed_knots": float(speed_knots),
+                "heading_degrees": float(heading_degrees),
+                "gps_accuracy_meters": float(gps_accuracy_meters) if gps_accuracy_meters is not None else 4.5,
+            }
+        else:
+            telemetry_dict = {
+                "available": False,
+                "source": "USER_DEVICE",
+                "reason": "NO_TELEMETRY_PROVIDED",
+                "latitude": None,
+                "longitude": None,
+                "speed_knots": float(speed_knots) if speed_knots is not None else 0.0,
+                "heading_degrees": float(heading_degrees) if heading_degrees is not None else 120.0,
+                "gps_accuracy_meters": None,
+            }
 
         # Step 0: Satellite Pre-Flight Freshness Check (bypassed in FAST_DEMO_MODE)
         if not FAST_DEMO_MODE:
@@ -1156,6 +1170,16 @@ def execute_orca_core(
         # Step 1: Execute through ORCA Routing Controller (main.py)
         response_data = process_marine_request(request_data, manager=manager_agent)
         if response_data.get("status") == "LOCATION_REQUIRED":
+            response_data["source_language"] = response_language
+            response_data["source_language_code"] = response_language
+            response_data["detected_language"] = detected_language
+            response_data["response_language"] = response_language
+            response_data["language_name"] = SUPPORTED_LANGUAGES.get(response_language, "English").capitalize()
+            response_data["query"] = original_query
+            response_data["original_query"] = original_query
+            response_data["english_query"] = english_query
+            response_data["effective_query"] = english_query
+            response_data["show_route"] = False
             return response_data
 
         # Step 2: Ensure UI and MapLibre compatibility fields are populated
@@ -1204,14 +1228,19 @@ def execute_orca_core(
             or (response_data.get("risk_assessment") or {}).get("out_of_domain")
             or (response_data.get("risk_assessment") or {}).get("security_rejection")
         )
-        analyzed_intent = (response_data.get("analyzed_intent") or "").upper()
+        analyzed_intent = (response_data.get("analyzed_intent") or response_data.get("intent") or "").upper()
         english_q_lower = (english_query or "").lower().strip()
 
         is_route_intent = (
-            analyzed_intent == "ROUTE"
-            or any(k in english_q_lower for k in ["route", "passage", "sail from", "navigate to", "route to", "waypoint", "to sri lanka", "colombo"])
+            analyzed_intent in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")
+            or any(k in english_q_lower for k in ["route", "passage", "sail from", "navigate to", "route to", "waypoint", "to sri lanka"])
+            or (re.search(r"\bnavigate\s+to\s+colombo\b|\bsail\s+to\s+colombo\b|\broute\s+to\s+colombo\b|\bpassage\s+to\s+colombo\b", english_q_lower) is not None)
             or ("from " in english_q_lower and " to " in english_q_lower)
         )
+        # Exclude boundary/cyclone/disaster intents from being re-classified as route
+        if is_route_intent and analyzed_intent in ("MARITIME_BOUNDARY", "EEZ", "CYCLONE", "DISASTER"):
+            is_route_intent = False
+
         is_cyclone_intent = (
             analyzed_intent == "DISASTER"
             or any(k in english_q_lower for k in ["cyclone", "storm", "hurricane", "typhoon", "depression", "tsunami", "surge", "radar", "warning", "gale"])
@@ -1342,24 +1371,67 @@ def execute_orca_core(
         solar_range = solar_data.get("solar_assisted_range_nm") or 21.4
 
         risk_metrics = risk_data.get("metrics") or {}
-        w_val = float(risk_metrics.get("wave_height_m", 1.2))
-        wind_val = float(risk_metrics.get("wind_speed_kmph", 14.0))
-        gust_val = float(risk_metrics.get("gust_speed_kmph", 18.0))
-        wind_dir = risk_metrics.get("wind_direction", "SW")
-        rain_val = float(risk_metrics.get("rainfall_mmh", 0.0))
-        press_val = float(risk_metrics.get("pressure_hpa", 1012.0))
-        sst_val_num = target_details.get("sst_c", 27.5)
+
+        ocean_res = response_data.get("OCEAN_AGENT") or {}
+        ocean_status = ocean_res.get("status") if isinstance(ocean_res, dict) else None
+        has_ocean_data = (
+            ocean_status not in ("DATA_UNAVAILABLE", "ERROR")
+            and risk_metrics.get("wave_height_m") is not None
+            and float(risk_metrics.get("wave_height_m", 0.0)) > 0
+        )
+
+        weather_res = response_data.get("WEATHER_AGENT") or {}
+        weather_status = weather_res.get("status") if isinstance(weather_res, dict) else None
+        has_weather_data = (
+            weather_status not in ("DATA_UNAVAILABLE", "ERROR")
+            and risk_metrics.get("wind_speed_kmph") is not None
+            and float(risk_metrics.get("wind_speed_kmph", 0.0)) > 0
+        )
+
+        w_val = float(risk_metrics["wave_height_m"]) if has_ocean_data else None
+        wind_val = float(risk_metrics["wind_speed_kmph"]) if has_weather_data else None
+        gust_val = float(risk_metrics.get("gust_speed_kmph", 0)) if has_weather_data else None
+        wind_dir = risk_metrics.get("wind_direction", "SW") if has_weather_data else "N/A"
+        rain_val = float(risk_metrics.get("rainfall_mmh", 0.0)) if has_weather_data else None
+        press_val = float(risk_metrics.get("pressure_hpa", 1012.0)) if has_weather_data else None
+        sst_val_num = target_details.get("sst_c") if (isinstance(target_details, dict) and target_details.get("sst_c") is not None) else None
 
         # Extract ML Multi-Horizon Forecast metrics if available
         weather_out = response_data.get("WEATHER_AGENT") or {}
         ml_fc_table = (weather_out.get("ml_forecast") or {}).get("forecast_table", [])
-        pred_w_24h = ml_fc_table[2].get("wave_height_m", round(w_val * 1.15, 2)) if len(ml_fc_table) >= 3 else round(w_val * 1.15, 2)
-        pred_wind_24h = ml_fc_table[2].get("wind_speed_kmh", round(wind_val * 1.1, 1)) if len(ml_fc_table) >= 3 else round(wind_val * 1.1, 1)
+        if has_ocean_data and len(ml_fc_table) >= 3:
+            pred_w_24h = ml_fc_table[2].get("wave_height_m", round(w_val * 1.15, 2))
+        elif has_ocean_data:
+            pred_w_24h = round(w_val * 1.15, 2)
+        else:
+            pred_w_24h = None
+
+        if has_weather_data and len(ml_fc_table) >= 3:
+            pred_wind_24h = ml_fc_table[2].get("wind_speed_kmh", round(wind_val * 1.1, 1))
+        elif has_weather_data:
+            pred_wind_24h = round(wind_val * 1.1, 1)
+        else:
+            pred_wind_24h = None
 
         # Extract PFZ ML persistence suitability if available
         pfz_agent_res = response_data.get("PFZ_AGENT") or {}
         ml_pfz_res = pfz_agent_res.get("ml_pfz") or {}
         pfz_hsi_pct = int(round((ml_pfz_res.get("habitat_suitability_index") or 0.88) * 100))
+
+        # Wave and wind strings with genuine provenance
+        if has_ocean_data:
+            wave_str = f"{w_val:.1f}m [OBSERVED/NRT]" if not is_route_intent else f"{w_val:.1f}m - {w_val + 0.2:.1f}m [OBSERVED/NRT]"
+            wave_badge = f"🌊 Wave Height: {w_val:.1f}m [OBSERVED/NRT]" + (f" | 24h Forecast: {pred_w_24h:.1f}m [ML FORECAST]" if pred_w_24h is not None else "")
+        else:
+            wave_str = "DATA_UNAVAILABLE"
+            wave_badge = "🌊 Wave Height: DATA_UNAVAILABLE [ISRO MOSDAC PENDING SYNC]"
+
+        if has_weather_data:
+            wind_str = f"{wind_val:.1f} km/h {wind_dir} [OBSERVED/NRT]"
+            wind_badge = f"💨 Wind Speed: {wind_val:.1f} km/h {wind_dir} [OBSERVED/NRT]" + (f" | 24h Forecast: {pred_wind_24h:.1f} km/h [ML FORECAST]" if pred_wind_24h is not None else "")
+        else:
+            wind_str = "DATA_UNAVAILABLE"
+            wind_badge = "💨 Wind Speed: DATA_UNAVAILABLE [ISRO MOSDAC PENDING SYNC]"
 
         # Tailor dynamic advisory badges to query intent with strict provenance tags
         if is_cyclone_intent:
@@ -1368,26 +1440,32 @@ def execute_orca_core(
             disaster_status = f"🌀 Active Cyclone: {c_name} [OFFICIAL SOURCE]" if c_name else "🌀 Cyclone Status: No Active Cyclone Detected [OFFICIAL SOURCE]"
             dynamic_advisories = [
                 disaster_status,
-                f"🌊 Wave Height: {w_val:.1f}m [OBSERVED/NRT] | 24h Forecast: {pred_w_24h:.1f}m [ML FORECAST]",
-                f"💨 Wind Speed: {wind_val:.1f} km/h {wind_dir} [OBSERVED/NRT]",
+                wave_badge,
+                wind_badge,
                 f"🛡️ Safety Assessment: Risk {risk_score_val}/100 [RULE/PHYSICS ENGINE]",
                 "🏛️ Emergency Shelter: Designated All-Weather Breakwater Basin [GIS]",
             ]
             nav_brief = "No tropical cyclone hazard active [OFFICIAL SOURCE]. Standard coastal maritime operations permitted."
         elif is_weather_intent:
+            rain_str = f"🌧️ Rain: {rain_val:.1f} mm/h [OBSERVED/NRT]" if rain_val is not None else "🌧️ Rain: DATA_UNAVAILABLE"
+            press_str = f"Pressure: {press_val:.0f} hPa [OBSERVED/NRT]" if press_val is not None else "Pressure: DATA_UNAVAILABLE"
             dynamic_advisories = [
-                "🌤️ Weather: Favorable Marine Conditions [OBSERVED/NRT]",
-                f"💨 Wind: {wind_val:.1f} km/h {wind_dir} [OBSERVED/NRT] | 24h Forecast: {pred_wind_24h:.1f} km/h [ML FORECAST]",
-                f"🌊 Wave: {w_val:.1f}m [OBSERVED/NRT] | 24h Forecast: {pred_w_24h:.1f}m [ML FORECAST]",
-                f"🌧️ Rain: {rain_val:.1f} mm/h [OBSERVED/NRT] | Pressure: {press_val:.0f} hPa [OBSERVED/NRT]",
+                "🌤️ Weather: Favorable Marine Conditions [OBSERVED/NRT]" if has_weather_data else "🌤️ Weather: Satellite Observation Pending Synchronization",
+                wind_badge,
+                wave_badge,
+                f"{rain_str} | {press_str}",
                 f"🛡️ Safety: Risk {risk_score_val}/100 [RULE/PHYSICS ENGINE]",
             ]
-            nav_brief = f"Weather conditions favorable with {wind_val:.1f} km/h winds [OBSERVED/NRT] and {w_val:.1f}m waves [OBSERVED/NRT]. 24h ML forecast: {pred_w_24h:.1f}m waves [ML FORECAST]."
+            if has_weather_data and has_ocean_data:
+                nav_brief = f"Weather conditions favorable with {wind_val:.1f} km/h winds [OBSERVED/NRT] and {w_val:.1f}m waves [OBSERVED/NRT]."
+            else:
+                nav_brief = "Marine weather observation telemetry is partially or fully pending synchronization with ISRO MOSDAC."
         elif is_fishing_intent:
+            sst_str = f"SST {sst_val_num:.1f}°C [OBSERVED/NRT]" if sst_val_num is not None else "SST: DATA_UNAVAILABLE"
             dynamic_advisories = [
                 f"🎯 Target: {target_name} ({relative_vector}) [GIS]",
                 f"🐟 High-Yield Catch: {catch_list} [CMFRI ECOLOGY]",
-                f"🌊 Sea State: Wave height {w_val:.1f}m [OBSERVED/NRT] | SST {sst_val_num:.1f}°C [OBSERVED/NRT]",
+                f"🌊 Sea State: Wave height {wave_str} | {sst_str}",
                 f"📊 48h PFZ Persistence: {pfz_hsi_pct}% Suitability [ML PREDICTION / INCOIS CRITERIA]",
                 f"🛡️ Safety: Risk {risk_score_val}/100 (Clear of IMBL) [GIS/SAFETY OVERRIDE]",
             ]
@@ -1395,20 +1473,18 @@ def execute_orca_core(
         else:
             dynamic_advisories = [
                 f"🎯 Target: {target_name} ({relative_vector}) [GIS]",
-                f"🌊 Sea State: {w_val:.1f}m [OBSERVED/NRT] | 24h Forecast: {pred_w_24h:.1f}m [ML FORECAST]",
-                f"💨 Wind Speed: {wind_val:.1f} km/h {wind_dir} [OBSERVED/NRT]",
-                f"🧭 Nav Brief: ~{duration_fmt} at {speed_kts} kt [GIS ROUTE]",
+                wave_badge,
+                wind_badge,
+                f"🧭 Nav Brief: ~{duration_fmt} at {speed_kts} kt [GIS ROUTE]" if is_route_intent else "🧭 Operational Corridor Cleared",
                 f"🛡️ Safety: Risk {risk_score_val}/100 (Clear of IMBL) [GIS]",
             ]
 
-        wave_str = f"{w_val:.1f}m [OBSERVED/NRT]" if not is_route_intent else "1.2m - 1.4m [OBSERVED/NRT]"
-        wind_str = f"{wind_val:.1f} km/h {wind_dir} [OBSERVED/NRT]"
         cyc_provenance = "None Active" if not (response_data.get("cyclone_intelligence") or {}).get("active_storms") else response_data.get("cyclone_intelligence")["active_storms"]
         provenance_dict = {
-            "current_wave": {"value": f"{w_val:.1f} m", "source": "OBSERVED/NRT"},
-            "predicted_wave_24h": {"value": f"{pred_w_24h:.1f} m", "source": "ML FORECAST"},
-            "current_wind": {"value": f"{wind_val:.1f} km/h {wind_dir}", "source": "OBSERVED/NRT"},
-            "predicted_wind_24h": {"value": f"{pred_wind_24h:.1f} km/h", "source": "ML FORECAST"},
+            "current_wave": {"value": wave_str, "source": "OBSERVED/NRT" if has_ocean_data else "DATA_UNAVAILABLE"},
+            "predicted_wave_24h": {"value": f"{pred_w_24h:.1f} m" if pred_w_24h is not None else "DATA_UNAVAILABLE", "source": "ML FORECAST" if pred_w_24h is not None else "DATA_UNAVAILABLE"},
+            "current_wind": {"value": wind_str, "source": "OBSERVED/NRT" if has_weather_data else "DATA_UNAVAILABLE"},
+            "predicted_wind_24h": {"value": f"{pred_wind_24h:.1f} km/h" if pred_wind_24h is not None else "DATA_UNAVAILABLE", "source": "ML FORECAST" if pred_wind_24h is not None else "DATA_UNAVAILABLE"},
             "cyclone_warning": {"value": cyc_provenance, "source": "OFFICIAL SOURCE"},
             "pfz_suitability": {"value": f"{pfz_hsi_pct}%", "source": "ML PREDICTION / INCOIS CRITERIA"},
             "coastal_jurisdiction": {"value": "Indian EEZ Waters Cleared", "source": "GIS"},
@@ -1423,10 +1499,14 @@ def execute_orca_core(
             "chat_text": advisory_msg,
             "native_advisory_text": advisory_msg,
             "threat_status": threat_status or "SAFE",
-            "risk_score": risk_score_val
+            "risk_score": risk_score_val,
+            "show_route": is_route_intent,
         }
 
         payload["status"] = "success"
+        payload["intent"] = "ROUTE" if is_route_intent else (analyzed_intent or "WEATHER")
+        payload["analyzed_intent"] = analyzed_intent
+        payload["show_route"] = is_route_intent
         payload["telemetry_provenance"] = provenance_dict
         payload["reply"] = advisory_msg
         payload["response"] = advisory_msg
@@ -1445,6 +1525,7 @@ def execute_orca_core(
         payload["response_language"] = response_language
         payload["original_query"] = original_query
         payload["english_query"] = english_query
+        payload["effective_query"] = english_query
         payload["reasoning_output"] = english_reasoning
         payload["final_response"] = advisory_msg
         payload["language_name"] = SUPPORTED_LANGUAGES.get(response_language, "English").capitalize()
@@ -1510,7 +1591,16 @@ def execute_orca_core(
             "📡 Telemetry: Satellite feed error or pending synchronization",
             "🛡️ Safety Advisory: Exercise caution; verify with local port authorities",
         ]
-        fallback_nav = "Caution: automated route verification unavailable due to processing error."
+        # Intent-aware fallback navigation/recommendation
+        q_check_str = (original_query or user_query or str(query) or "").lower()
+        is_route_fallback = (
+            any(k in q_check_str for k in ["route", "destination", "navigate", "bearing", "passage", "waypoint", "sail from", "sail to"])
+            or ("from " in q_check_str and " to " in q_check_str)
+        )
+        if is_route_fallback:
+            fallback_nav = "Caution: automated route verification unavailable due to processing error."
+        else:
+            fallback_nav = "Caution: automated advisory temporarily unavailable due to processing error. Verify local conditions before departure."
 
         localized_fallback = fallback_msg
         if target_err_lang != "en":
@@ -1521,23 +1611,25 @@ def execute_orca_core(
 
         fallback_advisory = {
             "recommendation": fallback_nav,
-            "wave_height": "1.2m",
-            "wind_speed": "14 km/h SW",
+            "wave_height": None,
+            "wind_speed": None,
             "key_advisories": fallback_advisories,
             "chat_text": localized_fallback,
             "native_advisory_text": localized_fallback,
-            "threat_status": "SAFE",
-            "risk_score": 16.8
+            "threat_status": "DATA_UNAVAILABLE",
+            "risk_score": None,
+            "show_route": is_route_fallback,
         }
         return {
-            "status": "success",
+            "status": "DATA_UNAVAILABLE",
             "reply": localized_fallback,
             "response": localized_fallback,
             "message": localized_fallback,
             "chat_text": localized_fallback,
             "native_advisory_text": localized_fallback,
-            "threat_status": "SAFE",
-            "risk_score": 16.8,
+            "threat_status": "DATA_UNAVAILABLE",
+            "risk_score": None,
+            "show_route": is_route_fallback,
             "advisory": fallback_advisory,
             "advisory_text": localized_fallback,
             "advisory_details": fallback_advisory,
@@ -1547,18 +1639,20 @@ def execute_orca_core(
             "response_language": target_err_lang,
             "original_query": original_query,
             "english_query": english_query,
+            "effective_query": english_query,
+            "query": original_query,
             "reasoning_output": fallback_msg,
             "final_response": localized_fallback,
             "language_name": SUPPORTED_LANGUAGES.get(target_err_lang, "English").capitalize(),
             "satellite_provenance": {
-                "primary_agency": "ISRO MOSDAC (INSAT-3DR, Oceansat-3)",
-                "secondary_agency": "Copernicus Marine Service (Sentinel-3 / CMEMS)",
-                "consensus_status": "DUAL_SOURCE_VERIFIED",
-                "confidence_score": 98.4
+                "primary_agency": "ISRO MOSDAC",
+                "secondary_agency": "Copernicus Marine Service",
+                "consensus_status": "DATA_UNAVAILABLE",
+                "confidence_score": 0.0,
+                "cache_status": "DATA_UNAVAILABLE",
+                "fallback_reason": "PROCESSING_ERROR_OR_DATA_UNAVAILABLE",
             },
-            "success": True,
-            "green_marine_energy": compute_live_green_energy(lat=lat, lon=lon),
-            "green_energy": compute_live_green_energy(lat=lat, lon=lon),
+            "success": False,
             "fallback_advisory": localized_fallback,
             "error": str(e)
         }
@@ -1624,11 +1718,22 @@ async def process_marine_query(request: QueryRequest, lang: Optional[str] = None
 
     print(f"\n[📱 Mobile App Request Received] Query: '{user_query}' | Persona: '{request.persona}' | Detected Lang: '{detected_lang}'")
 
-    lat = request.telemetry.latitude if (request.telemetry and request.telemetry.latitude is not None) else None
-    lon = request.telemetry.longitude if (request.telemetry and request.telemetry.longitude is not None) else None
-    speed_knots = request.telemetry.speed_knots if request.telemetry else 0.0
-    heading_degrees = request.telemetry.heading_degrees if request.telemetry else 120.0
-    gps_accuracy = request.telemetry.gps_accuracy_meters if request.telemetry else 4.5
+    t_payload = request.telemetry
+    if isinstance(t_payload, dict):
+        lat = t_payload.get("latitude")
+        lon = t_payload.get("longitude")
+        speed_knots = float(t_payload.get("speed_knots", 0.0) or 0.0)
+        heading_degrees = float(t_payload.get("heading_degrees", 120.0) or 120.0)
+        gps_accuracy = float(t_payload.get("gps_accuracy_meters", 4.5) or 4.5)
+    elif t_payload is not None:
+        lat = getattr(t_payload, "latitude", None)
+        lon = getattr(t_payload, "longitude", None)
+        speed_knots = float(getattr(t_payload, "speed_knots", 0.0) or 0.0)
+        heading_degrees = float(getattr(t_payload, "heading_degrees", 120.0) or 120.0)
+        gps_accuracy = float(getattr(t_payload, "gps_accuracy_meters", 4.5) or 4.5)
+    else:
+        lat, lon = None, None
+        speed_knots, heading_degrees, gps_accuracy = 0.0, 120.0, 4.5
     session_id = request.session_id or "sess_marine_ui"
 
     payload = execute_orca_core(

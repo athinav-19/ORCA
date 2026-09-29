@@ -1169,6 +1169,10 @@ class RiskAnalysisAgent:
         }
 
 
+# Alias for backwards compatibility with tests and callers
+DecisionEngine = RiskAnalysisAgent
+
+
 # =====================================================================
 # 2. SAFE ALTERNATIVE REROUTING
 # =====================================================================
@@ -2256,7 +2260,17 @@ class ReasoningAgent:
         vis = float(metrics.get("visibility_km", 10.0))
         temp = float(metrics.get("surface_temp_c", 27.5))
 
+        ocean_out = aggregated_data.get("OCEAN_AGENT") or {}
+        ocean_status = ocean_out.get("status") if isinstance(ocean_out, dict) else ""
+        is_ocean_unavail = (ocean_status == "DATA_UNAVAILABLE")
+
+        # Initialize weather status at function scope so all branches can safely reference them
+        weather_out = aggregated_data.get("WEATHER_AGENT") or {}
+        weather_status = weather_out.get("status") if isinstance(weather_out, dict) else ""
+        is_weather_unavail = (weather_status == "DATA_UNAVAILABLE")
+
         if is_departure_window and not is_route_query:
+
             title = f"{departure_harbor} — Safe Departure Window Analysis"
             weather_out = aggregated_data.get("WEATHER_AGENT") or {}
             weather_status = weather_out.get("status") if isinstance(weather_out, dict) else ""
@@ -2344,6 +2358,17 @@ class ReasoningAgent:
                 ]
                 recommendation = "Plan voyage according to numerical predictions and recheck before departure." if risk_level == "LOW" else "Postpone voyage until wave heights subside."
                 source_line = f"Open-Meteo Numerical Marine Model\nClassification: FORECAST\nHorizon: {forecast_horizon}"
+            elif is_weather_unavail and is_ocean_unavail:
+                title = f"{departure_harbor} — Weather Telemetry Unavailable"
+                summary = f"STATUS: DATA_UNAVAILABLE. Real-time satellite weather and ocean observation telemetry is currently pending synchronization for {departure_harbor}."
+                cond_lines = [
+                    "Status: DATA_UNAVAILABLE",
+                    "Surface Wind: Telemetry pending sync",
+                    "Wave Height: Altimetry data pending sync",
+                    "Active Storm/Cyclone Warning: None detected in basin",
+                ]
+                recommendation = "Consult local port authorities and official IMD/INCOIS marine broadcasts before departure."
+                source_line = f"ISRO MOSDAC / INCOIS Telemetry\nStatus: DATA_UNAVAILABLE"
             else:
                 title = f"{departure_harbor} — Current Conditions"
                 if risk_level in ("HIGH", "CRITICAL"):
@@ -2358,9 +2383,9 @@ class ReasoningAgent:
                     recommendation = "Normal operations are reasonable. Continue monitoring changing wind and wave conditions."
 
                 cond_lines = [
-                    f"Wind: {w_spd:.1f} km/h {w_dir}",
-                    f"Gusts: {g_spd:.1f} km/h",
-                    f"Waves: {w_ht:.1f} m",
+                    f"Wind: {w_spd:.1f} km/h {w_dir}" if not is_weather_unavail else "Wind: DATA_UNAVAILABLE",
+                    f"Gusts: {g_spd:.1f} km/h" if not is_weather_unavail else "Gusts: DATA_UNAVAILABLE",
+                    f"Waves: {w_ht:.1f} m" if not is_ocean_unavail else "Waves: DATA_UNAVAILABLE",
                     f"Sea Surface Temperature: {temp:.1f} °C",
                     f"Pressure: {press:.0f} hPa",
                     f"Rainfall: {rain:.1f} mm/h",
@@ -2397,16 +2422,28 @@ class ReasoningAgent:
             rec_coords = ""
 
         elif is_waves_query and not is_route_query and not is_fishing_query:
-            title = f"{departure_harbor} — Sea State & Wave Conditions"
-            summary = f"Sea state evaluated off {departure_harbor} with significant wave height at {w_ht:.1f} m and surface winds of {w_spd:.1f} km/h."
-            cond_lines = [
-                f"Significant Wave Height: {w_ht:.1f} m",
-                f"Swell Direction: {w_dir}",
-                f"Surface Wind: {w_spd:.1f} km/h",
-                f"Sea Surface Temperature: {temp:.1f} °C",
-            ]
-            recommendation = "Sea conditions are safe for transit. Observe standard small craft safety protocols." if risk_level == "LOW" else "Elevated wave heights; navigate with heightened caution."
-            source_line = f"SARAL-AltiKa / ISRO MOSDAC\nObservation: {dataset_ts}"
+            if is_ocean_unavail:
+                title = f"{departure_harbor} — Sea State Telemetry Unavailable"
+                summary = f"STATUS: DATA_UNAVAILABLE. Oceanographic wave and sea state telemetry for {departure_harbor} is currently pending synchronization with ISRO MOSDAC."
+                cond_lines = [
+                    "Status: DATA_UNAVAILABLE",
+                    "Significant Wave Height: Altimetry data pending sync",
+                    f"Swell Direction: {w_dir}",
+                    "Surface Wind: Scatterometer data pending sync" if is_weather_unavail else f"Surface Wind: {w_spd:.1f} km/h",
+                ]
+                recommendation = "Consult local port authorities and official IMD/INCOIS marine broadcasts before departure."
+                source_line = f"SARAL-AltiKa / ISRO MOSDAC\nStatus: DATA_UNAVAILABLE"
+            else:
+                title = f"{departure_harbor} — Sea State & Wave Conditions"
+                summary = f"Sea state evaluated off {departure_harbor} with significant wave height at {w_ht:.1f} m and surface winds of {w_spd:.1f} km/h."
+                cond_lines = [
+                    f"Significant Wave Height: {w_ht:.1f} m",
+                    f"Swell Direction: {w_dir}",
+                    f"Surface Wind: {w_spd:.1f} km/h",
+                    f"Sea Surface Temperature: {temp:.1f} °C",
+                ]
+                recommendation = "Sea conditions are safe for transit. Observe standard small craft safety protocols." if risk_level == "LOW" else "Elevated wave heights; navigate with heightened caution."
+                source_line = f"SARAL-AltiKa / ISRO MOSDAC\nObservation: {dataset_ts}"
             rec_coords = ""
 
         elif is_fishing_query and not is_route_query:
