@@ -233,6 +233,8 @@ def train_pfz_models(force_retrain: bool = False) -> Dict[str, Any]:
         "test_period": "2022-2025",
         "train_samples": len(train_df),
         "test_samples": len(test_df),
+        "data_classification": "RULE_EMULATION",
+        "status": "PENDING_REAL_GROUND_TRUTH",
         "scientific_basis": "INCOIS oceanographic criteria predicting 48h frontal persistence under turbulent mixing",
         "ethical_disclaimer": "Predicts favorable oceanographic habitat suitability. NEVER represents guaranteed fish presence.",
         "leakage_safeguards": "Target evaluated at t+48h, past lags at t-24h, zero circular formula derivation",

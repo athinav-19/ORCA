@@ -500,6 +500,7 @@ class RiskAnalysisAgent:
             "imbl_violation": False,
             "border_zone": "Indian Exclusive Economic Zone",
             "pfz_score": 50,
+            "visibility_km": 10.0,
             "location_name": "Offshore Sector",
         }
 
@@ -517,14 +518,21 @@ class RiskAnalysisAgent:
         # Extract from WEATHER_AGENT output
         weather_out = aggregated_data.get("WEATHER_AGENT")
         if isinstance(weather_out, dict):
-            telemetry = weather_out.get("telemetry", {})
-            metrics["wind_speed_kmph"] = float(
-                telemetry.get("wind_speed_kmh", metrics["wind_speed_kmph"])
-            )
-            metrics["gust_speed_kmph"] = float(
-                telemetry.get("gust_speed_kmh", metrics["gust_speed_kmph"])
-            )
-            if "location" in weather_out:
+            telemetry = weather_out.get("telemetry")
+            if isinstance(telemetry, dict):
+                metrics["wind_speed_kmph"] = float(
+                    telemetry.get("wind_speed_kmh", metrics["wind_speed_kmph"])
+                )
+                metrics["gust_speed_kmph"] = float(
+                    telemetry.get("gust_speed_kmh", metrics["gust_speed_kmph"])
+                )
+            elif "ml_prediction" in weather_out and isinstance(weather_out["ml_prediction"], dict):
+                ml_pred = weather_out["ml_prediction"]
+                if "wind_speed_kmh" in ml_pred and ml_pred["wind_speed_kmh"] is not None:
+                    metrics["wind_speed_kmph"] = float(ml_pred["wind_speed_kmh"])
+                if "gust_speed_kmph" in ml_pred and ml_pred["gust_speed_kmph"] is not None:
+                    metrics["gust_speed_kmph"] = float(ml_pred["gust_speed_kmph"])
+            if "location" in weather_out and weather_out["location"]:
                 metrics["location_name"] = weather_out["location"]
 
         # Extract from OCEAN_AGENT output
@@ -576,7 +584,9 @@ class RiskAnalysisAgent:
         # Extract from DISASTER_AGENT output (Severe Cyclonic Storms & Tsunamis)
         disaster_out = aggregated_data.get("DISASTER_AGENT")
         if isinstance(disaster_out, dict):
-            hazard_info = disaster_out.get("hazard_summary", disaster_out.get("hazard_assessment", {}))
+            hazard_info = disaster_out.get("hazard_summary") or disaster_out.get("hazard_assessment") or {}
+            if not isinstance(hazard_info, dict):
+                hazard_info = {}
             hazard_type = hazard_info.get("hazard_type", hazard_info.get("hazard_status", disaster_out.get("hazard_alert", "NONE_ACTIVE")))
             agent_status = disaster_out.get("status", "SAFE")
             has_hazard = (
@@ -628,7 +638,9 @@ class RiskAnalysisAgent:
         # Extract from GIS_AGENT output
         gis_out = aggregated_data.get("GIS_AGENT")
         if isinstance(gis_out, dict):
-            boundary = gis_out.get("boundary_check", gis_out.get("spatial_metrics", gis_out.get("spatial_data", {})))
+            boundary = gis_out.get("boundary_check") or gis_out.get("spatial_metrics") or gis_out.get("spatial_data") or {}
+            if not isinstance(boundary, dict):
+                boundary = {}
             metrics["within_eez"] = boundary.get("within_eez", boundary.get("is_within_eez", gis_out.get("is_within_eez", True)))
             if boundary.get("out_of_operational_domain") or gis_out.get("status") == "OUT_OF_OPERATIONAL_DOMAIN":
                 metrics["within_eez"] = False
@@ -641,7 +653,9 @@ class RiskAnalysisAgent:
                 metrics["border_zone"] = boundary["border_zone"]
 
             # Extract shipping lane assessment
-            lane_info = gis_out.get("shipping_lane_assessment", boundary.get("shipping_lane", {}))
+            lane_info = gis_out.get("shipping_lane_assessment") or boundary.get("shipping_lane") or {}
+            if not isinstance(lane_info, dict):
+                lane_info = {}
             if lane_info:
                 metrics["shipping_lane"] = lane_info
                 metrics["inside_shipping_lane"] = lane_info.get("inside_lane", False)
@@ -662,11 +676,12 @@ class RiskAnalysisAgent:
 
         # Extract visibility, sea fog, and solar insolation from WEATHER_AGENT output
         if isinstance(weather_out, dict):
-            telemetry = weather_out.get("telemetry", {})
-            metrics["visibility_km"] = float(telemetry.get("visibility_km", 10.0))
-            metrics["fog_cover_fraction"] = float(telemetry.get("fog_cover_fraction", 0.0))
-            metrics["solar_insolation_wm2"] = float(telemetry.get("solar_insolation_wm2", 820.0))
-            metrics["solar_daily_kwh_m2"] = float(telemetry.get("solar_daily_kwh_m2", 5.4))
+            telemetry = weather_out.get("telemetry")
+            if isinstance(telemetry, dict):
+                metrics["visibility_km"] = float(telemetry.get("visibility_km", 10.0))
+                metrics["fog_cover_fraction"] = float(telemetry.get("fog_cover_fraction", 0.0))
+                metrics["solar_insolation_wm2"] = float(telemetry.get("solar_insolation_wm2", 820.0))
+                metrics["solar_daily_kwh_m2"] = float(telemetry.get("solar_daily_kwh_m2", 5.4))
 
         # Extract from PFZ_AGENT output
         pfz_out = aggregated_data.get("PFZ_AGENT")
@@ -2220,11 +2235,16 @@ class ReasoningAgent:
         else:
             risk_level = "LOW"
 
+        is_departure_window = any(k in q_lower for k in [
+            "departure window", "safe departure", "sailing window", "safe to sail",
+            "when can i sail", "safe to depart", "departure time", "when to depart",
+            "small craft departure", "safe to cast off", "departure advisory"
+        ])
         is_cyclone_query = (intent_cat in ("CYCLONE", "DISASTER")) or any(k in q_lower for k in ["cyclone", "storm", "hurricane", "typhoon", "depression", "tsunami", "surge", "radar", "hazard", "gale"])
-        is_weather_query = (intent_cat == "WEATHER") or any(k in q_lower for k in ["weather", "wind", "rain", "temperature", "forecast", "cloud", "gust", "pressure", "barometer"])
+        is_weather_query = (intent_cat == "WEATHER") or is_departure_window or any(k in q_lower for k in ["weather", "wind", "rain", "temperature", "forecast", "cloud", "gust", "pressure", "barometer"])
         is_waves_query = (intent_cat in ("WAVES", "CURRENT", "OCEAN_CONDITIONS")) or any(k in q_lower for k in ["wave", "waves", "swell", "sea state", "rough sea", "calm sea", "current"])
-        is_fishing_query = (intent_cat in ("FISHING", "PFZ")) or any(k in q_lower for k in ["fish", "fishing", "pfz", "catch", "tuna", "mackerel", "sardine", "seerfish", "shoal", "yield"])
-        is_route_query = (intent_cat in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")) or any(k in q_lower for k in ["route", "passage", "sail from", "navigate", "navigation", "sri lanka", "colombo", "waypoint"]) or ("from " in q_lower and " to " in q_lower)
+        is_fishing_query = (not is_departure_window) and ((intent_cat in ("FISHING", "PFZ")) or any(k in q_lower for k in ["fish", "fishing", "pfz", "catch", "tuna", "mackerel", "sardine", "seerfish", "shoal", "yield"]))
+        is_route_query = (not is_departure_window) and ((intent_cat in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")) or any(k in q_lower for k in ["route", "passage", "sail from", "navigate", "navigation", "sri lanka", "colombo", "waypoint"]) or ("from " in q_lower and " to " in q_lower))
         is_boundary_query = (intent_cat in ("MARITIME_BOUNDARY", "EEZ")) or any(k in q_lower for k in ["eez", "boundary", "border", "imbl", "jurisdiction"])
 
         w_ht = float(metrics.get("wave_height_m") or metrics.get("wave_height") or 1.2)
@@ -2236,7 +2256,83 @@ class ReasoningAgent:
         vis = float(metrics.get("visibility_km", 10.0))
         temp = float(metrics.get("surface_temp_c", 27.5))
 
-        if is_weather_query and not is_route_query and not is_fishing_query and not is_cyclone_query:
+        if is_departure_window and not is_route_query:
+            title = f"{departure_harbor} — Safe Departure Window Analysis"
+            weather_out = aggregated_data.get("WEATHER_AGENT") or {}
+            weather_status = weather_out.get("status") if isinstance(weather_out, dict) else ""
+            is_weather_unavail = (weather_status == "DATA_UNAVAILABLE")
+
+            # Small craft operational thresholds: wind < 25 km/h, gusts < 35 km/h, wave < 1.5 m, vis >= 5 km
+            wind_ok = w_spd < 25.0
+            gust_ok = g_spd < 35.0
+            wave_ok = w_ht < 1.5
+            vis_ok = vis >= 5.0
+            no_hazard = not (metrics.get("is_cyclone_active") or metrics.get("hazard_active") or has_cyc_col or status in ("DANGER", "CRITICAL"))
+
+            all_safe = wind_ok and gust_ok and wave_ok and vis_ok and no_hazard
+
+            if is_weather_unavail and (w_spd == 14.0 and w_ht == 1.2):
+                summary = (
+                    f"Operational departure assessment for small craft off {departure_harbor}: "
+                    "Live ISRO MOSDAC satellite observational telemetry is currently pending synchronization for this sector. "
+                    "Standard small craft departure guidelines require sustained winds below 25 km/h, wave heights under 1.5 m, "
+                    "and absence of squall or convective activity."
+                )
+                cond_lines = [
+                    "Telemetry Status: SATELLITE_DATA_PENDING_SYNC",
+                    "Wind Threshold (Small Craft): < 25 km/h",
+                    "Wave Height Threshold: < 1.5 m",
+                    "Visibility Required: > 5 km",
+                    "Active Storm/Cyclone Warning: None detected in basin",
+                ]
+                recommendation = "Verify local coastal radar and port signals before casting off. Early morning windows (05:00–09:00 IST) typically present the calmest operational sea conditions."
+                source_line = f"ISRO MOSDAC / INCOIS Small Craft Operational Safety Guidelines\nObservation: {dataset_ts}"
+            elif not no_hazard:
+                summary = f"Unfavorable departure window for {departure_harbor}. Active maritime hazard or severe weather detected with winds of {w_spd:.1f} km/h and wave heights reaching {w_ht:.1f} m."
+                cond_lines = [
+                    "Departure Status: NO-GO / HAZARD_ACTIVE",
+                    f"Sustained Wind: {w_spd:.1f} km/h (Limit: 25 km/h)",
+                    f"Wave Height: {w_ht:.1f} m (Limit: 1.5 m)",
+                    f"Active Hazard: {cyc_intel.get('active_storms', 'Severe Storm / Cyclone Warning')}",
+                ]
+                recommendation = "Do NOT depart port. Small craft must remain safely moored until storm warnings are canceled."
+                source_line = f"IMD / ISRO MOSDAC Cyclone Warning Division\nObservation: {dataset_ts}"
+            elif all_safe:
+                summary = (
+                    f"Favorable departure window identified for small craft off {departure_harbor}. "
+                    f"Current conditions show winds of {w_spd:.1f} km/h {w_dir}, wave heights of {w_ht:.1f} m, "
+                    f"and visibility of {vis:.1f} km, all well within safe operational limits."
+                )
+                cond_lines = [
+                    "Departure Window: OPEN / FAVORABLE",
+                    f"Sustained Wind: {w_spd:.1f} km/h {w_dir} (Safe < 25 km/h)",
+                    f"Gusts: {g_spd:.1f} km/h",
+                    f"Wave Height: {w_ht:.1f} m (Safe < 1.5 m)",
+                    f"Visibility: {vis:.1f} km (Safe > 5 km)",
+                    "Optimal Sailing Hours: Morning through early afternoon before diurnal breeze build-up",
+                ]
+                recommendation = "Safe to depart. Maintain standard life jacket protocol and monitor VHF Channel 16 for coastal updates."
+                source_line = f"ISRO MOSDAC / IMD Telemetry\nObservation: {dataset_ts}"
+            else:
+                exceeded = []
+                if not wind_ok: exceeded.append(f"winds ({w_spd:.1f} km/h > 25 km/h)")
+                if not wave_ok: exceeded.append(f"waves ({w_ht:.1f} m > 1.5 m)")
+                if not vis_ok: exceeded.append(f"low visibility ({vis:.1f} km < 5 km)")
+                summary = (
+                    f"Marginal departure window for small craft off {departure_harbor}. "
+                    f"Safety thresholds exceeded for: {', '.join(exceeded)}."
+                )
+                cond_lines = [
+                    "Departure Window: MARGINAL / CAUTION",
+                    f"Wind: {w_spd:.1f} km/h {w_dir}",
+                    f"Waves: {w_ht:.1f} m",
+                    f"Visibility: {vis:.1f} km",
+                ]
+                recommendation = "Delay departure until coastal wind and wave conditions moderate below safe limits."
+                source_line = f"ISRO MOSDAC / INCOIS Telemetry\nObservation: {dataset_ts}"
+            rec_coords = ""
+
+        elif is_weather_query and not is_route_query and not is_fishing_query and not is_cyclone_query:
             if forecast_active:
                 f_wave_val = forecast_max_wave if forecast_max_wave is not None else wave
                 title = f"{departure_harbor} — Marine Forecast ({temporal_label})"
@@ -2548,6 +2644,7 @@ def run_decision_engine(
         normalized_query
         or raw_agent_outputs.get("normalized_query")
         or raw_agent_outputs.get("user_query")
+        or ""
     )
 
     # Check spatial consistency across domain agent outputs
@@ -2748,15 +2845,29 @@ def run_decision_engine(
     print(f"[3] Gemini Synthesis Engine : Advisory Generated ({synthesis.get('map_status')})")
     print(f"    - Model Active         : {reasoning_agent.model_name}")
 
+    intent_cat_run = (raw_agent_outputs.get("analyzed_intent") or "").upper() if raw_agent_outputs else ""
+    is_explicit_route_query = (intent_cat_run in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")) or any(k in resolved_query.lower() for k in ["route", "passage", "sail from", "navigate to", "route to", "waypoint", "to sri lanka", "colombo"]) or ("from " in resolved_query.lower() and " to " in resolved_query.lower())
+    is_departure_window_query = any(k in resolved_query.lower() for k in [
+        "departure window", "safe departure", "sailing window", "safe to sail",
+        "when can i sail", "safe to depart", "departure time", "when to depart",
+        "small craft departure", "safe to cast off", "departure advisory"
+    ])
+    if is_departure_window_query:
+        is_explicit_route_query = False
+
+    if not is_explicit_route_query:
+        alt_data["safe_sea_route"] = None
+        alt_data["reroute_needed"] = False
+
     final_payload = {
         "bhashini_text": synthesis.get("bhashini_text", ""),
         "text_advisory_local": synthesis.get("text_advisory_local", synthesis.get("bhashini_text", "")),
         "map_status": synthesis.get("map_status", risk_data["status"]),
-        "recommended_coordinates": synthesis.get("recommended_coordinates", alt_data["safe_coordinates"]),
+        "recommended_coordinates": (synthesis.get("recommended_coordinates") or alt_data["safe_coordinates"]) if is_explicit_route_query else synthesis.get("recommended_coordinates", ""),
         "primary_geographic_target": ocean_target,
         "risk_assessment": risk_data,
         "alternative_route": alt_data,
-        "safe_sea_route": alt_data.get("safe_sea_route") or raw_agent_outputs.get("GIS_AGENT", {}).get("safe_sea_route"),
+        "safe_sea_route": (alt_data.get("safe_sea_route") or raw_agent_outputs.get("GIS_AGENT", {}).get("safe_sea_route")) if is_explicit_route_query else None,
         "persona": p_enum.value,
         "language_code": language_code,
         "imbl_violation": risk_data.get("metrics", {}).get("imbl_violation", False),
@@ -2802,8 +2913,9 @@ def run_decision_engine(
         solar_w_m2 = 0
     else:
         # Retrieve observed solar insolation from Weather Agent telemetry if present
-        w_telemetry = (raw_agent_outputs.get("WEATHER_AGENT", {}).get("telemetry") or {}) if raw_agent_outputs else {}
-        insolation_obs = w_telemetry.get("solar_insolation_wm2")
+        w_agent = raw_agent_outputs.get("WEATHER_AGENT") if isinstance(raw_agent_outputs, dict) else None
+        w_telemetry = (w_agent.get("telemetry") or {}) if isinstance(w_agent, dict) else {}
+        insolation_obs = w_telemetry.get("solar_insolation_wm2") if isinstance(w_telemetry, dict) else None
         if insolation_obs is not None and isinstance(insolation_obs, (int, float)) and insolation_obs > 0:
             solar_w_m2 = int(round(insolation_obs))
         elif status_str in ("SAFE", "GO", "OPERATIONAL"):

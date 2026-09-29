@@ -160,7 +160,24 @@ def classify_marine_query_intent(query_text: str) -> Dict[str, Any]:
             ]
         }
 
-    # 2. ROUTE / SAFE_ROUTE / ROUTE_PLANNING
+    # 2. DEPARTURE WINDOW & OPERATIONAL SAILING SAFETY (Evaluated before route passage unless explicit destination is given)
+    departure_keywords = [
+        "departure window", "safe departure", "departure time", "when to depart",
+        "when can i sail", "safe to sail", "safe to depart", "small craft departure",
+        "sailing window", "safe departure window", "safe to cast off", "departure advisory"
+    ]
+    if any(k in q for k in departure_keywords) and not loc_extracted.get("destination"):
+        return {
+            "intent": "WEATHER",
+            "urgency": "MEDIUM",
+            "plan": [
+                {"agent_name": "WEATHER_AGENT", "task_instructions": "Check sustained wind speeds, storm gusts, and operational departure window.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "OCEAN_AGENT", "task_instructions": "Check significant wave height and operational sea conditions for small craft.", "expected_output_format": "TEXT_SUMMARY"},
+                {"agent_name": "DISASTER_AGENT", "task_instructions": "Check active tropical cyclones, storm squalls, and hazard warnings.", "expected_output_format": "TEXT_SUMMARY"},
+            ]
+        }
+
+    # 3. ROUTE / SAFE_ROUTE / ROUTE_PLANNING
     is_route_passage = (
         has_explicit_route
         or any(k in q for k in ["to sri lanka", "to colombo"])
@@ -764,16 +781,17 @@ class ManagerAgent:
                     datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 )
             )
-            user_context = input_data.get("user_context", {})
-            device_telemetry = input_data.get("device_telemetry", {})
-            user_input = input_data.get("user_input", {})
+            user_context = input_data.get("user_context") or {}
+            raw_device_telemetry = input_data.get("device_telemetry")
+            device_telemetry = raw_device_telemetry if isinstance(raw_device_telemetry, dict) else None
+            user_input = input_data.get("user_input") or {}
 
             raw_text = user_input.get("raw_text")
             raw_audio_base64 = user_input.get("raw_audio_base64")
             input_type = str(user_input.get("input_type", "TEXT" if raw_text else "AUDIO")).upper()
 
-            raw_lat = device_telemetry.get("latitude")
-            raw_lon = device_telemetry.get("longitude")
+            raw_lat = device_telemetry.get("latitude") if device_telemetry else None
+            raw_lon = device_telemetry.get("longitude") if device_telemetry else None
             lat = float(raw_lat) if raw_lat is not None else None
             lon = float(raw_lon) if raw_lon is not None else None
 
@@ -795,17 +813,37 @@ class ManagerAgent:
                 else:
                     query_text = "Where can I go fishing today and is it safe to sail?"
 
+            gps_acc = device_telemetry.get("gps_accuracy_meters") if device_telemetry else None
+            spd = device_telemetry.get("speed_knots") if device_telemetry else None
+            hdg = device_telemetry.get("heading_degrees") if device_telemetry else None
+
+            if lat is not None and lon is not None:
+                telemetry_state = {
+                    "available": True,
+                    "source": "USER_DEVICE",
+                    "latitude": lat,
+                    "longitude": lon,
+                    "gps_accuracy_meters": float(gps_acc) if gps_acc is not None else 4.5,
+                    "speed_knots": float(spd) if spd is not None else 0.0,
+                    "heading_degrees": float(hdg) if hdg is not None else 0.0,
+                }
+            else:
+                telemetry_state = {
+                    "available": False,
+                    "source": "USER_DEVICE",
+                    "reason": "NO_TELEMETRY_PROVIDED",
+                    "latitude": None,
+                    "longitude": None,
+                    "gps_accuracy_meters": float(gps_acc) if gps_acc is not None else None,
+                    "speed_knots": float(spd) if spd is not None else 0.0,
+                    "heading_degrees": float(hdg) if hdg is not None else 0.0,
+                }
+
             return {
                 "session_id": session_id,
                 "client_timestamp": client_timestamp,
                 "user_context": user_context,
-                "device_telemetry": {
-                    "latitude": lat,
-                    "longitude": lon,
-                    "gps_accuracy_meters": float(device_telemetry.get("gps_accuracy_meters", 4.5)),
-                    "speed_knots": float(device_telemetry.get("speed_knots", 0.0)),
-                    "heading_degrees": float(device_telemetry.get("heading_degrees", 0.0)),
-                },
+                "device_telemetry": telemetry_state,
                 "user_input": {
                     "input_type": input_type,
                     "raw_text": raw_text,
@@ -846,9 +884,8 @@ class ManagerAgent:
         client_timestamp = mobile_payload["client_timestamp"]
         telemetry = mobile_payload["device_telemetry"]
         user_context = mobile_payload["user_context"]
-        effective_query = mobile_payload["effective_query"]
-        lat = telemetry.get("latitude")
-        lon = telemetry.get("longitude")
+        lat = telemetry.get("latitude") if isinstance(telemetry, dict) else None
+        lon = telemetry.get("longitude") if isinstance(telemetry, dict) else None
         gps_str = f"{lat:.4f},{lon:.4f}" if (lat is not None and lon is not None) else None
 
         loc_extracted = extract_locations_from_query(effective_query)
@@ -1678,6 +1715,7 @@ def process_marine_request(
         normalized_query=normalized_query,
     )
     final_payload["analyzed_intent"] = orchestration_result.get("analyzed_intent")
+    final_payload["intent"] = orchestration_result.get("analyzed_intent")
     final_payload["execution_plan"] = plan
     final_payload["agents_used"] = [s.get("agent_name") for s in plan if s.get("agent_name")]
 
