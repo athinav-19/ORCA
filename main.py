@@ -1845,11 +1845,25 @@ def process_marine_request(
     final_payload["audio_payload_base64"] = audio_payload_base64
 
     # Step 8: Package final multi-modal payload matching ORCA schema
-    is_route_intent = (
-        (orchestration_result.get("analyzed_intent") or "").upper() in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")
-        or any(k in english_text.lower() for k in ["route", "passage", "sail from", "navigate to", "route to", "waypoint", "to sri lanka", "colombo"])
-        or ("from " in english_text.lower() and " to " in english_text.lower())
+    analyzed_intent_upper = (orchestration_result.get("analyzed_intent") or "").upper()
+    non_route_intents = (
+        "MARITIME_BOUNDARY", "EEZ", "CYCLONE", "DISASTER", "WEATHER",
+        "OCEAN", "OCEAN_CONDITIONS", "SEA_CONDITIONS", "PFZ", "FISHING", "GENERAL", "GENERAL_MARINE"
     )
+    eng_lower = english_text.lower().strip()
+    has_explicit_route_keyword = (
+        any(k in eng_lower for k in ["safe route", "give me a route", "route from", "best route", "alternative route", "recommend a route", "sail from", "navigate to", "passage from"])
+        or (re.search(r"\b(navigate|sail|route|passage)\s+to\s+colombo\b", eng_lower) is not None)
+        or ("route" in eng_lower and "from " in eng_lower and " to " in eng_lower)
+    )
+    is_route_intent = (
+        analyzed_intent_upper in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")
+        or (has_explicit_route_keyword and analyzed_intent_upper not in non_route_intents)
+    )
+    if not is_route_intent:
+        final_payload["safe_sea_route"] = None
+        if "alternative_route" in final_payload and isinstance(final_payload["alternative_route"], dict):
+            final_payload["alternative_route"]["safe_sea_route"] = None
 
     final_payload["success"] = True
     final_payload["session_id"] = session_id

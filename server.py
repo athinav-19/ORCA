@@ -48,6 +48,75 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
+# Build Diagnostics & Deployment Identification
+def get_build_info() -> Dict[str, str]:
+    commit = (
+        os.getenv("ORCA_BUILD_COMMIT")
+        or os.getenv("RENDER_GIT_COMMIT")
+        or os.getenv("GIT_COMMIT")
+        or os.getenv("COMMIT_SHA")
+        or ""
+    )
+    branch = (
+        os.getenv("ORCA_BUILD_BRANCH")
+        or os.getenv("RENDER_GIT_BRANCH")
+        or os.getenv("GIT_BRANCH")
+        or ""
+    )
+    timestamp = os.getenv("ORCA_BUILD_TIMESTAMP") or ""
+
+    # Check for build_info.json generated during build/CI
+    info_file = BASE_DIR / "build_info.json"
+    if info_file.exists():
+        try:
+            with open(info_file, "r", encoding="utf-8") as f:
+                f_data = json.load(f)
+                commit = commit or f_data.get("commit", "")
+                branch = branch or f_data.get("branch", "")
+                timestamp = timestamp or f_data.get("timestamp", "")
+        except Exception:
+            pass
+
+    # Fallback to local git repository if available
+    if not commit or not branch:
+        try:
+            import subprocess
+            if not commit:
+                commit = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, timeout=2
+                ).decode().strip()
+            if not branch:
+                branch = subprocess.check_output(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL, timeout=2
+                ).decode().strip()
+        except Exception:
+            pass
+
+    if not commit:
+        commit = "UNKNOWN"
+    if not branch:
+        branch = "main"
+    if not timestamp:
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    return {
+        "commit": commit,
+        "branch": branch,
+        "timestamp": timestamp,
+        "entrypoint": "server:app",
+    }
+
+
+BUILD_INFO = get_build_info()
+
+print(f"\n==========================================")
+print(f"[ORCA BUILD]")
+print(f"commit={BUILD_INFO['commit']}")
+print(f"branch={BUILD_INFO['branch']}")
+print(f"timestamp={BUILD_INFO['timestamp']}")
+print(f"entrypoint={BUILD_INFO['entrypoint']}")
+print(f"==========================================\n")
+
 # Import ORCA Multi-Agent Backend & Persona Schemas
 from models import (
     StakeholderPersona,
@@ -104,25 +173,27 @@ from notification_provider import mask_phone_number
 from sms_provider import print_sms_startup_banner, get_sms_status
 from background_worker import cyclone_worker
 
-# Copernicus Marine Service Import & Portable Authentication
-import copernicusmarine
-_cop_user = os.getenv("COPERNICUS_MARINE_USERNAME") or os.getenv("COPERNICUS_USERNAME")
-_cop_pass = os.getenv("COPERNICUS_MARINE_PASSWORD") or os.getenv("COPERNICUS_PASSWORD")
-if _cop_user and _cop_pass:
-    try:
-        copernicusmarine.login(username=_cop_user, password=_cop_pass, force_overwrite=True)
-        print("[Copernicus Marine] Authentication successful")
-    except Exception:
-        print("[Copernicus Marine] Authentication unavailable")
-else:
-    try:
-        _cred_path = os.path.expanduser(os.path.join("~", ".copernicusmarine", ".copernicusmarine-credentials"))
-        if os.path.exists(_cred_path):
+# Copernicus Marine Service Non-blocking Authentication
+def _init_copernicus_auth():
+    """Non-blocking authentication initialization for Copernicus Marine."""
+    _cop_user = os.getenv("COPERNICUS_MARINE_USERNAME") or os.getenv("COPERNICUS_USERNAME")
+    _cop_pass = os.getenv("COPERNICUS_MARINE_PASSWORD") or os.getenv("COPERNICUS_PASSWORD")
+    if _cop_user and _cop_pass:
+        try:
+            import copernicusmarine
+            copernicusmarine.login(username=_cop_user, password=_cop_pass, force_overwrite=True)
             print("[Copernicus Marine] Authentication successful")
-        else:
+        except Exception:
             print("[Copernicus Marine] Authentication unavailable")
-    except Exception:
-        print("[Copernicus Marine] Authentication unavailable")
+    else:
+        try:
+            _cred_path = os.path.expanduser(os.path.join("~", ".copernicusmarine", ".copernicusmarine-credentials"))
+            if os.path.exists(_cred_path):
+                print("[Copernicus Marine] Authentication credentials found")
+            else:
+                print("[Copernicus Marine] Authentication unavailable")
+        except Exception:
+            print("[Copernicus Marine] Authentication unavailable")
 
 # =====================================================================
 # COPERNICUS MARINE SERVICE & MULTI-AGENCY DATASET LIFECYCLE MANAGER
@@ -194,78 +265,41 @@ class DataSyncManager:
 
     @classmethod
     def ensure_baseline_copernicus_cache(cls):
-        """Ensures a baseline NetCDF cache file exists in ./data/copernicus_cache so consensus engine always has data."""
+        """Ensures the copernicus cache directory exists. Never fabricates synthetic satellite grids."""
         os.makedirs(cls.COPERNICUS_CACHE_DIR, exist_ok=True)
-        if not os.path.exists(cls.COPERNICUS_SST_FILE):
-            try:
-                import xarray as xr
-                import numpy as np
-                lats = np.linspace(0.0, 25.0, 26)
-                lons = np.linspace(65.0, 97.0, 33)
-                sst_grid = np.full((len(lats), len(lons)), 27.7, dtype=np.float32)
-                ds = xr.Dataset(
-                    {"thetao": (["latitude", "longitude"], sst_grid)},
-                    coords={"latitude": lats, "longitude": lons},
-                    attrs={"title": "Copernicus Marine CMEMS SST All-India Baseline Cache"}
-                )
-                ds.to_netcdf(cls.COPERNICUS_SST_FILE)
-                print("[Dataset Sync] Initialized baseline Copernicus SST NetCDF cache.")
-            except Exception as e:
-                print(f"[Dataset Sync Warning] Baseline cache creation notice: {e}")
-        else:
-            try:
-                os.utime(cls.COPERNICUS_SST_FILE, None)
-            except Exception:
-                pass
 
     @classmethod
     def verify_or_update_datasets(cls):
         """
-        FAST-PATH, NON-BLOCKING dataset verification.
-        If copernicus_sst_india.nc already exists, return immediately (zero network calls).
-        If cache is missing/stale, spawn a daemon background thread to refresh asynchronously
-        so the /chat endpoint always returns in under 2 seconds.
+        Background dataset verification helper.
+        Spawns a background thread if cache is stale; never blocks the caller.
         """
         import threading
-
-        # Always create baseline if the file doesn't exist (zero-network synthetic fallback).
-        if not os.path.exists(cls.COPERNICUS_SST_FILE):
-            cls.ensure_baseline_copernicus_cache()
-
-        # FAST PATH: cache file exists -> return immediately, no blocking.
-        if os.path.exists(cls.COPERNICUS_SST_FILE):
-            copernicus_fresh = cls.is_copernicus_fresh()
-            mosdac_fresh = cls.is_mosdac_fresh()
-            if not (copernicus_fresh and mosdac_fresh):
-                # Stale cache: kick off a background refresh for the next request.
-                def _bg_sync():
-                    try:
-                        ensure_latest_mosdac_cache(max_age_hours=cls.CACHE_TTL_HOURS)
-                    except Exception:
-                        pass
-                    try:
-                        download_copernicus_data()
-                    except Exception:
-                        pass
-                    print("[Dataset Sync BG] Background telemetry refresh complete.")
-                already_running = any(
-                    th.name == "orca-bg-sync" and th.is_alive()
-                    for th in threading.enumerate()
-                )
-                if not already_running:
-                    t = threading.Thread(target=_bg_sync, daemon=True, name="orca-bg-sync")
-                    t.start()
-                    print("[Dataset Sync] Cache stale - background refresh launched. Serving cached data immediately.")
-            else:
-                print("[Dataset Sync OK] Telemetry fresh (<24h). Proceeding to agent routing.")
-            return True
-
-        # Baseline creation should always ensure file exists; guard return.
+        cls.ensure_baseline_copernicus_cache()
+        copernicus_fresh = cls.is_copernicus_fresh()
+        mosdac_fresh = cls.is_mosdac_fresh()
+        if not (copernicus_fresh and mosdac_fresh):
+            def _bg_sync():
+                try:
+                    ensure_latest_mosdac_cache(max_age_hours=cls.CACHE_TTL_HOURS)
+                except Exception:
+                    pass
+                try:
+                    download_copernicus_data()
+                except Exception:
+                    pass
+            already_running = any(
+                th.name == "orca-bg-sync" and th.is_alive()
+                for th in threading.enumerate()
+            )
+            if not already_running:
+                t = threading.Thread(target=_bg_sync, daemon=True, name="orca-bg-sync")
+                t.start()
         return True
 
 
 def verify_or_update_datasets():
-    """Pre-flight function called at the start of /chat or /query."""
+    """Background dataset verification hook."""
     try:
         return DataSyncManager.verify_or_update_datasets()
     except Exception as e:
@@ -280,14 +314,12 @@ def compute_multi_agency_consensus(
 ) -> Dict[str, Any]:
     """
     Cross-validates parsed ISRO MOSDAC telemetry against Copernicus Marine Service data.
-    Compares MOSDAC SST with Copernicus SST (evaluates variance Δ < 0.5°C),
-    computes data_confidence_score, prints fusion confirmation, and returns satellite provenance.
+    If actual SST is unavailable, returns sst = null and consensus_status = DATA_UNAVAILABLE or SINGLE_SOURCE.
+    Zero fabricated numbers.
     """
     import math
-    if mosdac_sst is None or not isinstance(mosdac_sst, (int, float)):
-        mosdac_sst = 27.5
 
-    copernicus_sst = 27.7
+    copernicus_sst = None
     cop_file = DataSyncManager.COPERNICUS_SST_FILE
     if os.path.exists(cop_file) and lat is not None and lon is not None:
         try:
@@ -304,22 +336,43 @@ def compute_multi_agency_consensus(
                         if not (math.isnan(sampled) or sampled < -50 or sampled > 50):
                             copernicus_sst = round(sampled, 2)
         except Exception:
-            pass
+            copernicus_sst = None
 
-    variance = round(abs(mosdac_sst - copernicus_sst), 2)
-    if variance == 0.0:
-        variance = 0.2
+    if mosdac_sst is not None and not isinstance(mosdac_sst, (int, float)):
+        try:
+            mosdac_sst = float(mosdac_sst)
+        except Exception:
+            mosdac_sst = None
 
-    confidence_str = "HIGH" if variance < 0.5 else "MODERATE"
-    confidence_score = round(max(90.0, min(99.9, 100.0 - (variance * 8.0))), 1)
-
-    print(f"[Multi-Agency Telemetry Fusion] ISRO MOSDAC (India) + Copernicus Marine (EU) Verified | SST Variance: Δ{variance:.1f}°C | Confidence: {confidence_str}")
+    if mosdac_sst is not None and copernicus_sst is not None:
+        variance = round(abs(mosdac_sst - copernicus_sst), 2)
+        confidence_str = "HIGH" if variance < 0.5 else "MODERATE"
+        confidence_score = round(max(50.0, min(99.0, 100.0 - (variance * 10.0))), 1)
+        consensus_status = "DUAL_SOURCE_VERIFIED"
+        print(f"[Multi-Agency Telemetry Fusion] ISRO MOSDAC + Copernicus Verified | SST Variance: Δ{variance:.1f}°C | Confidence: {confidence_str}")
+    elif mosdac_sst is not None:
+        variance = None
+        confidence_score = 75.0
+        consensus_status = "SINGLE_SOURCE"
+        print("[Multi-Agency Telemetry Fusion] ISRO MOSDAC Only (Copernicus unavailable)")
+    elif copernicus_sst is not None:
+        variance = None
+        confidence_score = 70.0
+        consensus_status = "SINGLE_SOURCE"
+        print("[Multi-Agency Telemetry Fusion] Copernicus Marine Only (MOSDAC unavailable)")
+    else:
+        variance = None
+        confidence_score = 0.0
+        consensus_status = "DATA_UNAVAILABLE"
+        print("[Multi-Agency Telemetry Fusion] Both satellite feeds unavailable - DATA_UNAVAILABLE")
 
     prov_result = {
         "primary_agency": "ISRO MOSDAC (INSAT-3DR, Oceansat-3)",
         "secondary_agency": "Copernicus Marine Service (Sentinel-3 / CMEMS)",
-        "consensus_status": "DUAL_SOURCE_VERIFIED",
-        "confidence_score": confidence_score
+        "consensus_status": consensus_status,
+        "confidence_score": confidence_score,
+        "mosdac_sst": mosdac_sst,
+        "copernicus_sst": copernicus_sst,
     }
 
     try:
@@ -426,6 +479,10 @@ def synthesize_copilot_advisory(payload_data: Dict[str, Any]) -> str:
     else:
         p1 = "Route analysis complete. You are cleared for transit to your designated maritime operating sector with favorable navigational conditions observed across coastal and offshore zones."
 
+    metrics = risk.get("metrics") or {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+
     lat_val = target.get("target_lat")
     lon_val = target.get("target_lon")
     if lat_val is None:
@@ -498,17 +555,22 @@ def synthesize_copilot_advisory(payload_data: Dict[str, Any]) -> str:
     except Exception:
         wind_val = 14.0
 
-    sst_val = details.get("sst_c") or details.get("sampled_sst") or (payload_data.get("PFZ_AGENT", {}) or {}).get("sst") or 27.5
-    if not isinstance(sst_val, (int, float)):
+    sst_val = details.get("sst_c") or details.get("sampled_sst") or (payload_data.get("PFZ_AGENT", {}) or {}).get("sst")
+    if sst_val is not None:
         try:
             sst_val = float(sst_val)
         except Exception:
-            sst_val = 27.5
+            sst_val = None
+
+    if sst_val is not None:
+        sst_desc = f"sea surface temperatures near {sst_val:.1f}°C"
+    else:
+        sst_desc = "favorable thermal conditions"
 
     if "pfz" in target_name.lower() or "hotspot" in target_name.lower() or "fish" in target_name.lower():
-        dest_reason = f"identified as an optimal {target_name} offering favorable sea surface temperatures near {sst_val:.1f}°C and high pelagic catch probability for species including {catch_list}."
+        dest_reason = f"identified as an optimal {target_name} offering {sst_desc} and high pelagic catch probability for species including {catch_list}."
     else:
-        dest_reason = f"identified as an optimal destination waypoint for {target_name} offering favorable sea surface conditions near {sst_val:.1f}°C."
+        dest_reason = f"identified as an optimal destination waypoint for {target_name} offering {sst_desc}."
 
     p2 = (
         f"The primary operating destination is established at {coords_str}, {dest_reason} "
@@ -709,6 +771,8 @@ def compute_live_green_energy(lat: Optional[float] = None, lon: Optional[float] 
 @app.get("/ping")
 @app.get("/api/health")
 @app.get("/api/v1/health")
+@app.get("/api/status")
+@app.get("/status")
 async def health_check(lat: Optional[float] = None, lon: Optional[float] = None):
     """
     Lightweight health check endpoint for cloud deployments, docker containers,
@@ -719,6 +783,9 @@ async def health_check(lat: Optional[float] = None, lon: Optional[float] = None)
         "status": "healthy",
         "service": "ORCA Marine Multi-Agent Intelligence Backend",
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "build": BUILD_INFO,
+        "commit": BUILD_INFO.get("commit"),
+        "branch": BUILD_INFO.get("branch"),
         "architecture": "ISRO SIH 176 Multi-Agent Engine",
         "mosdac_cache": "READY",
         "agents_online": len(agent_registry),
@@ -728,6 +795,13 @@ async def health_check(lat: Optional[float] = None, lon: Optional[float] = None)
         "green_marine_energy": green_data,
         "green_energy": green_data,
     }
+
+
+@app.get("/api/build")
+@app.get("/api/version")
+async def get_build_diagnostic():
+    """Returns deployment commit SHA, branch, and entrypoint diagnostics."""
+    return BUILD_INFO
 
 
 @app.get("/api/green-energy")
@@ -1090,9 +1164,13 @@ def execute_orca_core(
     detected_language = detect_language_from_text(original_query, default_lang=language or "en")
     response_language = detected_language
 
+    # Canonical query flow defined in outer scope:
+    # original_query -> detected_language -> english_query -> effective_query -> process_marine_request
+    english_query = original_query
+    effective_query = english_query
+
     try:
         # Inbound Translation Layer via IndicTranslationService
-        english_query = original_query
         if detected_language != "en" and original_query:
             try:
                 import concurrent.futures as _cf
@@ -1111,12 +1189,15 @@ def execute_orca_core(
                 english_query = original_query
                 print(f"[Translation] Inbound translation error: {_te} - using original text.")
 
+        effective_query = english_query
+
         # 3. Structured Logging as required
         print(
             f"\n[Language]\n"
             f"Original: {original_query}\n"
             f"Detected: {detected_language}\n"
             f"Internal: {english_query}\n"
+            f"Effective: {effective_query}\n"
             f"Response Language: {response_language}\n"
             f"Translation: SUCCESS\n"
         )
@@ -1146,14 +1227,7 @@ def execute_orca_core(
                 "gps_accuracy_meters": None,
             }
 
-        # Step 0: Satellite Pre-Flight Freshness Check (bypassed in FAST_DEMO_MODE)
-        if not FAST_DEMO_MODE:
-            try:
-                ensure_latest_mosdac_cache(max_age_hours=72.0, non_blocking=True)
-            except Exception as e:
-                print(f"[Warning] MOSDAC pre-flight check notice: {e}")
-
-        # Assemble request dictionary matching SIH 176 schema
+        # Assemble request dictionary matching SIH 176 schema (zero blocking satellite calls on request path)
         request_data = {
             "session_id": session_id,
             "client_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1163,17 +1237,19 @@ def execute_orca_core(
                 "detected_language": detected_language,
                 "target_response_language": response_language,
                 "original_query": original_query,
+                "effective_query": effective_query,
             },
             "device_telemetry": telemetry_dict,
             "user_input": {
                 "input_type": req_input_type,
-                "raw_text": english_query,
+                "raw_text": effective_query,
                 "raw_audio_base64": raw_audio,
                 "source_language_code": response_language,
                 "detected_language": detected_language,
                 "target_response_language": response_language,
                 "original_query": original_query,
                 "english_query": english_query,
+                "effective_query": effective_query,
             },
         }
 
@@ -1188,7 +1264,7 @@ def execute_orca_core(
             response_data["query"] = original_query
             response_data["original_query"] = original_query
             response_data["english_query"] = english_query
-            response_data["effective_query"] = english_query
+            response_data["effective_query"] = effective_query
             response_data["show_route"] = False
             try:
                 from response_validator import validate_orca_response
@@ -1210,15 +1286,16 @@ def execute_orca_core(
         response_data["query"] = original_query
         response_data["original_query"] = original_query
         response_data["english_query"] = english_query
+        response_data["effective_query"] = effective_query
         response_data["translation_engine"] = "deep_translator_indic"
 
         # Multi-Agency Consensus Engine: Cross-validate ISRO MOSDAC with Copernicus Marine
-        mosdac_sst_val = 27.5
+        mosdac_sst_val = None
         pfz_agent_out = response_data.get("PFZ_AGENT") or {}
         if isinstance(pfz_agent_out, dict):
-            mosdac_sst_val = pfz_agent_out.get("sst", pfz_agent_out.get("sampled_sst", 27.5))
-            if not isinstance(mosdac_sst_val, (int, float)):
-                mosdac_sst_val = 27.5
+            raw_s = pfz_agent_out.get("sst", pfz_agent_out.get("sampled_sst"))
+            if isinstance(raw_s, (int, float)):
+                mosdac_sst_val = float(raw_s)
 
         satellite_provenance = compute_multi_agency_consensus(
             mosdac_sst=mosdac_sst_val,
@@ -1307,12 +1384,13 @@ def execute_orca_core(
         risk_data = response_data.get("risk_assessment") or {}
         threat_status = response_data.get("map_status") or risk_data.get("status") or "SAFE"
         risk_score = risk_data.get("risk_score")
-        if risk_score is None or risk_score == "N/A":
-            risk_score = 16.8
-        try:
-            risk_score = float(risk_score)
-        except Exception:
-            risk_score = 16.8
+        if risk_score is not None and risk_score != "N/A":
+            try:
+                risk_score = float(risk_score)
+            except Exception:
+                risk_score = None
+        else:
+            risk_score = None
 
         # Step 4: Outbound Translation Layer via IndicTranslationService
         if response_language != "en":
@@ -1384,7 +1462,7 @@ def execute_orca_core(
         risk_data = payload.get("risk_assessment") or {}
         if not isinstance(risk_data, dict):
             risk_data = {}
-        risk_score_val = risk_data.get("risk_score", risk_score or 16.8)
+        risk_score_val = risk_score
 
         # INSAT-3DR Solar calculation from green_marine_energy
         solar_data = payload.get("green_marine_energy") or {}
@@ -1731,166 +1809,214 @@ async def process_marine_query(request: QueryRequest, lang: Optional[str] = None
     Takes queries in any regional language (Tamil, Hindi, Malayalam, Bengali, etc.)
     or Base64 audio payloads (SIH 176), runs the 9-dataset MOSDAC multi-agent pipeline
     with bidirectional language translation and Brotli compression.
+    Non-blocking: Never stalls on external satellite downloads.
     """
-    # Pre-flight Automated Dataset Freshness & Lifecycle Verification
-    verify_or_update_datasets()
-
-    req_input_type = (request.input_type or "TEXT").upper()
-    raw_audio = request.raw_audio_base64
-    user_query = (request.query_text or request.query or "").strip()
-
-    # Resolve requested client language, detecting script directly from original query
-    raw_lang = (lang or request.lang or request.language_preference or request.source_language_code or "en").strip().lower()
-    detected_lang = detect_language_from_text(user_query, default_lang=raw_lang)
-
-    request.query_text = user_query
-    request.language_preference = detected_lang
-    request.source_language_code = detected_lang
-    request.lang = detected_lang
-
-    if req_input_type != "AUDIO" and not user_query:
-        user_query = "Hello Captain"
-        request.query_text = user_query
-
-    # In-Memory Query Debounce / Cache Check (10-second window, keyed by query + detected language)
-    global LAST_QUERY_CACHE
-    now = time.time()
-    clean_q = (user_query or '').strip().lower()
-    query_key = f"{clean_q}::{detected_lang}" if len(clean_q) >= 3 else ""
-    if (
-        query_key
-        and query_key in LAST_QUERY_CACHE
-        and (now - LAST_QUERY_CACHE[query_key].get("timestamp", 0)) < 10.0
-        and LAST_QUERY_CACHE[query_key].get("response") is not None
-    ):
-        print(f"[FastPath Cache HIT] Returning cached response for '{query_key}'")
-        payload = LAST_QUERY_CACHE[query_key]["response"]
-        if "satellite_provenance" not in payload:
-            payload["satellite_provenance"] = {
-                "primary_agency": "ISRO MOSDAC (INSAT-3DR, Oceansat-3)",
-                "secondary_agency": "Copernicus Marine Service (Sentinel-3 / CMEMS)",
-                "consensus_status": "DUAL_SOURCE_VERIFIED",
-                "confidence_score": 98.4
-            }
-        print(f"\n🚀 [SENDING TO ANDROID] -> {json.dumps(payload, indent=2)}\n")
-        return JSONResponse(payload)
-
-    print(f"\n[📱 Mobile App Request Received] Query: '{user_query}' | Persona: '{request.persona}' | Detected Lang: '{detected_lang}'")
-
-    t_payload = request.telemetry
-    if isinstance(t_payload, dict):
-        lat = t_payload.get("latitude")
-        lon = t_payload.get("longitude")
-        speed_knots = float(t_payload.get("speed_knots", 0.0) or 0.0)
-        heading_degrees = float(t_payload.get("heading_degrees", 120.0) or 120.0)
-        gps_accuracy = float(t_payload.get("gps_accuracy_meters", 4.5) or 4.5)
-    elif t_payload is not None:
-        lat = getattr(t_payload, "latitude", None)
-        lon = getattr(t_payload, "longitude", None)
-        speed_knots = float(getattr(t_payload, "speed_knots", 0.0) or 0.0)
-        heading_degrees = float(getattr(t_payload, "heading_degrees", 120.0) or 120.0)
-        gps_accuracy = float(getattr(t_payload, "gps_accuracy_meters", 4.5) or 4.5)
-    else:
-        lat, lon = None, None
-        speed_knots, heading_degrees, gps_accuracy = 0.0, 120.0, 4.5
-    session_id = request.session_id or "sess_marine_ui"
-
-    payload = execute_orca_core(
-        query=user_query,
-        lat=lat,
-        lon=lon,
-        persona=request.persona,
-        language=detected_lang,
-        speed_knots=speed_knots,
-        heading_degrees=heading_degrees,
-        gps_accuracy_meters=gps_accuracy,
-        session_id=session_id,
-        input_type=req_input_type,
-        raw_audio=raw_audio,
-    )
-
-    if payload.get("status") == "LOCATION_REQUIRED":
-        print(f"\n🚀 [SENDING TO ANDROID] -> {json.dumps(payload, indent=2)}\n")
-        return JSONResponse(payload)
-
-    # Populate prompt suggestions if missing
-    if "prompt_suggestions" not in payload or not payload["prompt_suggestions"]:
-        suggestions_map = {
-            "gu": [
-                "શું આજે પોરબંદર નજીક માછીમારી કરવા જવું સુરક્ષિત છે?",
-                "સૌથી નજીકનો સંભવિત મત્સ્યઉદ્યોગ ઝોન (PFZ) ક્યાં છે?",
-                "દરિયાઈ મોજાંની ઊંચાઈ અને પવનની ગતિ કેટલી છે?",
-                "શું કોઈ વાવાઝોડું કે તોફાનની ચેતવણી છે?"
-            ],
-            "ta": [
-                "தூத்துக்குடி அருகே இன்று மீன்பிடிக்க செல்லலாமா?",
-                "அருகிலுள்ள சிறந்த மீன்பிடி மண்டலம் (PFZ) எங்கே உள்ளது?",
-                "கடல் அலை உயரம் மற்றும் காற்றின் வேகம் என்ன?",
-                "புயல் அல்லது சுழற்காற்று எச்சரிக்கைகள் ஏதேனும் உள்ளதா?"
-            ],
-            "hi": [
-                "क्या आज तूतीकोरिन के पास मछली पकड़ने जाना सुरक्षित है?",
-                "निकटतम संभावित मत्स्य पालन क्षेत्र (PFZ) कहाँ है?",
-                "समुद्र की लहरों की ऊंचाई और हवा की गति क्या है?",
-                "क्या कोई चक्रवात या तूफान की चेतावनी है?"
-            ],
-            "ml": [
-                "ഇന്ന് കടലിൽ പോകുന്നത് സുരക്ഷിതമാണോ?",
-                "ഏറ്റവും അടുത്തുള്ള മത്സ്യബന്ധന മേഖല എവിടെയാണ്?",
-                "തിരമാലയുടെ ഉയരവും കാറ്റിന്റെ വേഗതയും എത്രയാണ്?",
-                "ചുഴലിക്കാറ്റ് മുന്നറിയിപ്പുകൾ വല്ലതുമുണ്ടോ?"
-            ],
-            "te": [
-                "ఈరోజు చేపల వేటకు వెళ్లడం సురక్షితమేనా?",
-                "సమీపంలోని సంభావ్య మత్స్య ప్రాంతం (PFZ) ఎక్కడ ఉంది?",
-                "సముద్ర అలల ఎత్తు మరియు గాలి వేగం ఎంత?",
-                "తుఫాను లేదా వాతావరణ హెచ్చరికలు ஏమైనా ఉన్నాయా?"
-            ]
-        }
-        payload["prompt_suggestions"] = suggestions_map.get(detected_lang, [
-            "Is it safe to go fishing near Tuticorin today?",
-            "Where is the nearest high-yield PFZ fishing zone?",
-            "Check wave height and wind speed offshore",
-            "Are there any cyclone or rough sea warnings?"
-        ])
-
     try:
-        orca_response = OrcaResponse(**payload)
-        orca_response.prompt_suggestions = payload.get("prompt_suggestions")
-        orca_response.source_language = payload.get("source_language", detected_lang)
-        orca_response.language_name = payload.get("language_name", SUPPORTED_LANGUAGES.get(detected_lang, "English").capitalize())
-        orca_response.status = payload.get("status", "SUCCESS")
-        orca_response.intent = payload.get("intent")
-        orca_response.visualization = payload.get("visualization")
-        orca_response.conditions = payload.get("conditions")
-        orca_response.recommendation = payload.get("recommendation")
-        orca_response.summary = payload.get("summary")
-        orca_response.data_quality = payload.get("data_quality")
-        orca_response.safe_sea_route = payload.get("safe_sea_route")
-        orca_response.alternative_route = payload.get("alternative_route")
-        reply_val = payload.get("reply") or payload.get("chat_text") or payload.get("message") or ""
-        orca_response.reply = payload.get("reply", reply_val)
-        orca_response.response = payload.get("response", reply_val)
-        orca_response.message = payload.get("message", reply_val)
-        orca_response.chat_text = payload.get("chat_text", reply_val)
-        orca_response.native_advisory_text = payload.get("native_advisory_text", reply_val)
-        orca_response.advisory = payload.get("advisory", {})
-        orca_response.advisory_details = payload.get("advisory_details", {})
-        orca_response.threat_status = payload.get("threat_status", "SAFE")
-        orca_response.risk_score = payload.get("risk_score", 0.0)
-        orca_response.satellite_provenance = payload.get("satellite_provenance", {})
-    except Exception as _m_err:
-        print(f"[Model Notice] OrcaResponse schema validation notice: {_m_err}")
+        req_input_type = (request.input_type or "TEXT").upper()
+        raw_audio = request.raw_audio_base64
+        user_query = (request.query_text or request.query or "").strip()
 
-    # Update in-memory query debounce cache (keyed per distinct query)
-    if query_key:
-        LAST_QUERY_CACHE[query_key] = {
-            "response": payload,
-            "timestamp": time.time()
+        # Resolve requested client language, detecting script directly from original query
+        raw_lang = (lang or request.lang or request.language_preference or request.source_language_code or "en").strip().lower()
+        detected_lang = detect_language_from_text(user_query, default_lang=raw_lang)
+
+        request.query_text = user_query
+        request.language_preference = detected_lang
+        request.source_language_code = detected_lang
+        request.lang = detected_lang
+
+        if req_input_type != "AUDIO" and not user_query:
+            user_query = "Hello Captain"
+            request.query_text = user_query
+
+        # In-Memory Query Debounce / Cache Check (10-second window, keyed by query + detected language)
+        global LAST_QUERY_CACHE
+        now = time.time()
+        clean_q = (user_query or '').strip().lower()
+        query_key = f"{clean_q}::{detected_lang}" if len(clean_q) >= 3 else ""
+        if (
+            query_key
+            and query_key in LAST_QUERY_CACHE
+            and (now - LAST_QUERY_CACHE[query_key].get("timestamp", 0)) < 10.0
+            and LAST_QUERY_CACHE[query_key].get("response") is not None
+        ):
+            print(f"[FastPath Cache HIT] Returning cached response for '{query_key}'")
+            payload = LAST_QUERY_CACHE[query_key]["response"]
+            print(f"\n🚀 [SENDING TO ANDROID] -> {json.dumps(payload, indent=2)}\n")
+            return JSONResponse(payload)
+
+        print(f"\n[📱 Mobile App Request Received] Query: '{user_query}' | Persona: '{request.persona}' | Detected Lang: '{detected_lang}'")
+
+        t_payload = request.telemetry
+        if isinstance(t_payload, dict):
+            lat = t_payload.get("latitude")
+            lon = t_payload.get("longitude")
+            speed_knots = float(t_payload.get("speed_knots", 0.0) or 0.0)
+            heading_degrees = float(t_payload.get("heading_degrees", 120.0) or 120.0)
+            gps_accuracy = float(t_payload.get("gps_accuracy_meters", 4.5) or 4.5)
+        elif t_payload is not None:
+            lat = getattr(t_payload, "latitude", None)
+            lon = getattr(t_payload, "longitude", None)
+            speed_knots = float(getattr(t_payload, "speed_knots", 0.0) or 0.0)
+            heading_degrees = float(getattr(t_payload, "heading_degrees", 120.0) or 120.0)
+            gps_accuracy = float(getattr(t_payload, "gps_accuracy_meters", 4.5) or 4.5)
+        else:
+            lat, lon = None, None
+            speed_knots, heading_degrees, gps_accuracy = 0.0, 120.0, 4.5
+        session_id = request.session_id or "sess_marine_ui"
+
+        payload = execute_orca_core(
+            query=user_query,
+            lat=lat,
+            lon=lon,
+            persona=request.persona,
+            language=detected_lang,
+            speed_knots=speed_knots,
+            heading_degrees=heading_degrees,
+            gps_accuracy_meters=gps_accuracy,
+            session_id=session_id,
+            input_type=req_input_type,
+            raw_audio=raw_audio,
+        )
+
+        if payload.get("status") == "LOCATION_REQUIRED":
+            print(f"\n🚀 [SENDING TO ANDROID] -> {json.dumps(payload, indent=2)}\n")
+            return JSONResponse(payload)
+
+        # Populate prompt suggestions if missing
+        if "prompt_suggestions" not in payload or not payload["prompt_suggestions"]:
+            suggestions_map = {
+                "gu": [
+                    "શું આજે પોરબંદર નજીક માછીમારી કરવા જવું સુરક્ષિત છે?",
+                    "સૌથી નજીકનો સંભવિત મત્સ્યઉદ્યોગ ઝોન (PFZ) ક્યાં છે?",
+                    "દરિયાઈ મોજાંની ઊંચાઈ અને પવનની ગતિ કેટલી છે?",
+                    "શું કોઈ વાવાઝોડું કે તોફાનની ચેતવણી છે?"
+                ],
+                "ta": [
+                    "தூத்துக்குடி அருகே இன்று மீன்பிடிக்க செல்லலாமா?",
+                    "அருகிலுள்ள சிறந்த மீன்பிடி மண்டலம் (PFZ) எங்கே உள்ளது?",
+                    "கடல் அலை உயரம் மற்றும் காற்றின் வேகம் என்ன?",
+                    "புயல் அல்லது சுழற்காற்று எச்சரிக்கைகள் ஏதேனும் உள்ளதா?"
+                ],
+                "hi": [
+                    "क्या आज तूतीकोरिन के पास मछली पकड़ने जाना सुरक्षित है?",
+                    "निकटतम संभावित मत्स्य पालन क्षेत्र (PFZ) कहाँ है?",
+                    "समुद्र की लहरों की ऊंचाई और हवा की गति क्या है?",
+                    "क्या कोई चक्रवात या तूफान की चेतावनी है?"
+                ],
+                "ml": [
+                    "ഇന്ന് കടലിൽ പോകുന്നത് സുരക്ഷിതമാണോ?",
+                    "ഏറ്റവും അടുത്തുള്ള മത്സ്യബന്ധന മേഖല എവിടെയാണ്?",
+                    "തിരമാലയുടെ ഉയരവും കാറ്റിന്റെ വേഗതയും എത്രയാണ്?",
+                    "ചുഴലിക്കാറ്റ് മുന്നറിയിപ്പുകൾ വല്ലതുമുണ്ടോ?"
+                ],
+                "te": [
+                    "ఈరోజు చేపల వేటకు వెళ్లడం సురక్షితమేనా?",
+                    "సమీపంలోని సంభావ్య మత్స్య ప్రాంతం (PFZ) ఎక్కడ ఉంది?",
+                    "సముద్ర అలల ఎత్తు మరియు గాలి వేగం ఎంత?",
+                    "తుఫాను లేదా వాతావరణ హెచ్చరికలు ஏమైనా ఉన్నాయా?"
+                ]
+            }
+            payload["prompt_suggestions"] = suggestions_map.get(detected_lang, [
+                "Is it safe to go fishing near Tuticorin today?",
+                "Where is the nearest high-yield PFZ fishing zone?",
+                "Check wave height and wind speed offshore",
+                "Are there any cyclone or rough sea warnings?"
+            ])
+
+        try:
+            orca_response = OrcaResponse(**payload)
+            orca_response.prompt_suggestions = payload.get("prompt_suggestions")
+            orca_response.source_language = payload.get("source_language", detected_lang)
+            orca_response.language_name = payload.get("language_name", SUPPORTED_LANGUAGES.get(detected_lang, "English").capitalize())
+            orca_response.status = payload.get("status", "SUCCESS")
+            orca_response.intent = payload.get("intent")
+            orca_response.visualization = payload.get("visualization")
+            orca_response.conditions = payload.get("conditions")
+            orca_response.recommendation = payload.get("recommendation")
+            orca_response.summary = payload.get("summary")
+            orca_response.data_quality = payload.get("data_quality")
+            orca_response.safe_sea_route = payload.get("safe_sea_route")
+            orca_response.alternative_route = payload.get("alternative_route")
+            reply_val = payload.get("reply") or payload.get("chat_text") or payload.get("message") or ""
+            orca_response.reply = payload.get("reply", reply_val)
+            orca_response.response = payload.get("response", reply_val)
+            orca_response.message = payload.get("message", reply_val)
+            orca_response.chat_text = payload.get("chat_text", reply_val)
+            orca_response.native_advisory_text = payload.get("native_advisory_text", reply_val)
+            orca_response.advisory = payload.get("advisory", {})
+            orca_response.advisory_details = payload.get("advisory_details", {})
+            orca_response.threat_status = payload.get("threat_status", "SAFE")
+            orca_response.risk_score = payload.get("risk_score", 0.0)
+            orca_response.satellite_provenance = payload.get("satellite_provenance", {})
+        except Exception as _m_err:
+            print(f"[Model Notice] OrcaResponse schema validation notice: {_m_err}")
+
+        # Update in-memory query debounce cache (preserving exact original provenance & fields)
+        if query_key:
+            LAST_QUERY_CACHE[query_key] = {
+                "response": payload,
+                "timestamp": time.time()
+            }
+
+        print(f"\n🚀 [SENDING TO ANDROID] -> {json.dumps(payload, indent=2)}\n")
+        return JSONResponse(payload)
+
+    except Exception as _ep_err:
+        import traceback
+        traceback.print_exc()
+        fallback_msg = (
+            "STATUS: DATA_UNAVAILABLE. Telemetry processing is temporarily unavailable. "
+            "Automated safety advice cannot be generated at this time. Please consult official IMD/INCOIS marine broadcasts before departure."
+        )
+        clean_fallback = {
+            "status": "DATA_UNAVAILABLE",
+            "reply": fallback_msg,
+            "response": fallback_msg,
+            "message": fallback_msg,
+            "chat_text": fallback_msg,
+            "native_advisory_text": fallback_msg,
+            "threat_status": "DATA_UNAVAILABLE",
+            "risk_score": None,
+            "show_route": False,
+            "intent": "DATA_UNAVAILABLE",
+            "analyzed_intent": "DATA_UNAVAILABLE",
+            "conditions": {
+                "wave_height_m": None,
+                "wind_speed_kmh": None,
+                "wind_direction": None,
+                "sea_condition": "UNKNOWN",
+                "swell_wave_height_m": None,
+                "surface_current_knots": None,
+                "status": "DATA_UNAVAILABLE",
+            },
+            "risk_assessment": {
+                "level": "MODERATE",
+                "score": None,
+                "factors": ["Satellite feed error or pending synchronization"],
+                "status": "DATA_UNAVAILABLE",
+            },
+            "data_quality": {
+                "status": "DATA_UNAVAILABLE",
+                "sources": {
+                    "primary_agency": "ISRO MOSDAC",
+                    "secondary_agency": "Copernicus Marine Service",
+                },
+                "confidence_score": 0.0,
+            },
+            "satellite_provenance": {
+                "primary_agency": "ISRO MOSDAC",
+                "secondary_agency": "Copernicus Marine Service",
+                "consensus_status": "DATA_UNAVAILABLE",
+                "confidence_score": 0.0,
+                "cache_status": "DATA_UNAVAILABLE",
+                "fallback_reason": "PROCESSING_ERROR_OR_DATA_UNAVAILABLE",
+            },
+            "success": False,
+            "error": "INTERNAL_PROCESSING_ERROR",
+            "error_code": "INTERNAL_PROCESSING_ERROR",
         }
-
-    print(f"\n🚀 [SENDING TO ANDROID] -> {json.dumps(payload, indent=2)}\n")
-    return JSONResponse(payload)
+        return JSONResponse(clean_fallback, status_code=200)
 
 
 # =====================================================================
@@ -1906,8 +2032,6 @@ async def handle_satellite_message(raw_request: Request):
     Accepts compact SatelliteMessage, validates boundaries, checks idempotency by message_id,
     executes the ORCA multi-agent pipeline, and returns a bandwidth-minimized compact response.
     """
-    verify_or_update_datasets()
-
     # 1. Gateway Enabled Check
     if not gateway_adapter.is_enabled():
         return JSONResponse(
@@ -2040,8 +2164,6 @@ async def handle_satellite_webhook(raw_request: Request):
     Authenticates via HMAC signature or API key, dispatches to ORCA pipeline, sends response
     back through the gateway adapter, and returns immediate HTTP acknowledgment.
     """
-    verify_or_update_datasets()
-
     if not gateway_adapter.is_enabled():
         return JSONResponse(
             status_code=503,

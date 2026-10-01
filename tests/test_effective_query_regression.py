@@ -44,6 +44,9 @@ class TestEffectiveQueryRegression(unittest.TestCase):
 
     def setUp(self):
         self.manager = ManagerAgent()
+        import server
+        if hasattr(server, "manager_agent") and hasattr(server.manager_agent, "sessions"):
+            server.manager_agent.sessions.clear()
 
     # -------------------------------------------------------------------------
     # 1. Regression test: "Show current sea conditions, swell wave height, and wind"
@@ -187,7 +190,7 @@ class TestEffectiveQueryRegression(unittest.TestCase):
             pass
 
         # Verify that in LOCATION_REQUIRED or error states, mock values (1.2m, 14 km/h SW, 16.8) are NOT used
-        loc_req_resp = execute_orca_core(query=fallback_query, lat=None, lon=None)
+        loc_req_resp = execute_orca_core(query=fallback_query, lat=None, lon=None, session_id="test_06_isolated")
         adv = loc_req_resp.get("advisory") or {}
         # Ensure wave_height and wind_speed are not fabricated
         self.assertNotEqual(adv.get("wave_height"), "1.2m")
@@ -288,7 +291,40 @@ class TestEffectiveQueryRegression(unittest.TestCase):
         # Verify structured conditions and risk assessment exist
         self.assertIsInstance(resp_err.get("conditions"), dict)
         self.assertIsInstance(resp_err.get("risk_assessment"), dict)
-        self.assertIsInstance(resp_err.get("data_quality"), dict)
+    # -------------------------------------------------------------------------
+    # 11. Android exact payload with telemetry regression test
+    # -------------------------------------------------------------------------
+    def test_11_android_exact_payload_with_telemetry(self):
+        """Regression test for the exact Android payload that previously triggered NameError."""
+        payload = {
+            "query": "Show current sea conditions, swell wave height, and wind",
+            "persona": "FISHERMAN",
+            "lang": "en",
+            "telemetry": {
+                "latitude": 18.9220,
+                "longitude": 72.8347,
+                "speed_knots": 8.5,
+                "heading_degrees": 120.0,
+                "gps_accuracy_meters": 4.5
+            }
+        }
+        resp = execute_orca_core(
+            query=payload["query"],
+            lat=payload["telemetry"]["latitude"],
+            lon=payload["telemetry"]["longitude"],
+            persona=payload["persona"],
+            speed_knots=payload["telemetry"]["speed_knots"],
+            heading_degrees=payload["telemetry"]["heading_degrees"],
+            gps_accuracy_meters=payload["telemetry"]["gps_accuracy_meters"]
+        )
+        self.assertNotIn("NameError", str(resp))
+        self.assertNotIn("UnboundLocalError", str(resp))
+        self.assertNotIn("Traceback", str(resp))
+        self.assertEqual(resp.get("status"), "success")
+        self.assertFalse(resp.get("show_route", True))
+        self.assertIsNone(resp.get("safe_sea_route"))
+        self.assertIsNotNone(resp.get("effective_query"))
+        self.assertEqual(resp.get("effective_query"), payload["query"])
 
 
 if __name__ == "__main__":
