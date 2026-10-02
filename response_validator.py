@@ -156,7 +156,7 @@ def validate_orca_response(
 
     if is_route_query:
         alt_route = payload.get("alternative_route") or {}
-        route_info = alt_route.get("safe_sea_route") or payload.get("safe_sea_route") or {}
+        route_info = payload.get("safe_sea_route") or alt_route.get("safe_sea_route") or {}
         wps = route_info.get("waypoints") or route_info.get("route_waypoints") or []
         payload["visualization"] = {
             "type": "ROUTE",

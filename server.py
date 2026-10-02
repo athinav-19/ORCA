@@ -771,8 +771,6 @@ def compute_live_green_energy(lat: Optional[float] = None, lon: Optional[float] 
 @app.get("/ping")
 @app.get("/api/health")
 @app.get("/api/v1/health")
-@app.get("/api/status")
-@app.get("/status")
 async def health_check(lat: Optional[float] = None, lon: Optional[float] = None):
     """
     Lightweight health check endpoint for cloud deployments, docker containers,
@@ -1135,6 +1133,55 @@ def build_conversational_greeting(user_query: str, english_query: str, source_la
 # =====================================================================
 
 
+def ensure_json_serializable(obj: Any) -> Any:
+    """
+    Recursively audits and converts all objects to JSON-native data structures
+    (dicts, lists, strings, numbers, booleans, None) before output leaves the API boundary.
+    Handles Pydantic models, LocationContext, Shapely geometry interfaces, numpy scalars,
+    and ISO timestamps.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    # Handle LocationContext or objects with to_dict()
+    if hasattr(obj, "to_dict") and callable(obj.to_dict):
+        return ensure_json_serializable(obj.to_dict())
+    # Handle Pydantic v2 / v1
+    if hasattr(obj, "model_dump") and callable(obj.model_dump):
+        return ensure_json_serializable(obj.model_dump())
+    if hasattr(obj, "dict") and callable(obj.dict) and not isinstance(obj, type):
+        return ensure_json_serializable(obj.dict())
+    # Handle dataclasses
+    if hasattr(obj, "__dataclass_fields__"):
+        import dataclasses
+        return ensure_json_serializable(dataclasses.asdict(obj))
+    # Handle Shapely geometries
+    if hasattr(obj, "__geo_interface__"):
+        return ensure_json_serializable(obj.__geo_interface__)
+    # Handle datetime / date / time
+    if isinstance(obj, (datetime.datetime, datetime.date, datetime.time)):
+        return obj.isoformat()
+    # Handle NumPy scalars / arrays
+    if hasattr(obj, "item") and callable(obj.item) and hasattr(obj, "ndim") and obj.ndim == 0:
+        return obj.item()
+    if hasattr(obj, "tolist") and callable(obj.tolist):
+        return ensure_json_serializable(obj.tolist())
+    # Handle Dict
+    if isinstance(obj, dict):
+        return {str(k): ensure_json_serializable(v) for k, v in obj.items()}
+    # Handle List / Tuple / Set
+    if isinstance(obj, (list, tuple, set)):
+        return [ensure_json_serializable(item) for item in obj]
+    # Fallback: check if JSON serializable as is, else stringify
+    try:
+        import json
+        json.dumps(obj)
+        return obj
+    except (TypeError, OverflowError):
+        return str(obj)
+
+
 def execute_orca_core(
     query: str,
     lat: Optional[float] = None,
@@ -1275,7 +1322,7 @@ def execute_orca_core(
                 )
             except Exception:
                 pass
-            return response_data
+            return ensure_json_serializable(response_data)
 
         # Step 2: Ensure UI and MapLibre compatibility fields are populated
         response_data["source_language"] = response_language
@@ -1660,7 +1707,7 @@ def execute_orca_core(
         except Exception as _val_err:
             print(f"[ResponseValidator Warning] Validation note: {_val_err}")
 
-        return payload
+        return ensure_json_serializable(payload)
 
     except Exception as e:
         import traceback
@@ -1792,7 +1839,7 @@ def execute_orca_core(
             )
         except Exception:
             pass
-        return fallback_payload
+        return ensure_json_serializable(fallback_payload)
 
 
 @app.post("/query")

@@ -503,6 +503,34 @@ class GisAgent:
             "is_unknown": True,
         }
 
+    def _serialize_target_location(self, target_location: Any, sector: Optional[Dict[str, Any]] = None) -> Any:
+        if target_location is None:
+            return None
+        if hasattr(target_location, "to_dict") and callable(target_location.to_dict):
+            return target_location.to_dict()
+        if hasattr(target_location, "model_dump") and callable(target_location.model_dump):
+            return target_location.model_dump()
+        if isinstance(target_location, dict):
+            res = {}
+            for k, v in target_location.items():
+                if hasattr(v, "to_dict") and callable(v.to_dict):
+                    res[k] = v.to_dict()
+                elif hasattr(v, "model_dump") and callable(v.model_dump):
+                    res[k] = v.model_dump()
+                else:
+                    res[k] = v
+            return res
+        lat = sector.get("lat") if sector else None
+        lon = sector.get("lon") if sector else None
+        name = sector.get("name") if sector else None
+        if lat is not None and lon is not None and not (isinstance(target_location, str) and not target_location.strip()):
+            return {
+                "name": name or str(target_location),
+                "latitude": float(lat),
+                "longitude": float(lon),
+            }
+        return str(target_location)
+
     def check_imbl(self, target_location: Any) -> bool:
         """
         Evaluates whether a target location or coordinate pair constitutes an intentional or actual
@@ -520,8 +548,6 @@ class GisAgent:
             except (ValueError, TypeError):
                 return False
 
-        loc_str = str(target_location).strip().lower()
-
         # Explicit foreign ports and Sri Lankan geographic keywords
         foreign_keywords = [
             "sri lanka", "srilanka", "ceylon", "jaffna", "colombo", "talaimannar",
@@ -529,6 +555,30 @@ class GisAgent:
             "point pedro", "delft island", "neduntheevu", "mannar island", "pesalai",
             "cross imbl", "cross the imbl", "cross border", "cross the border"
         ]
+
+        if hasattr(target_location, "latitude") or hasattr(target_location, "name"):
+            t_lat = getattr(target_location, "latitude", None)
+            t_lon = getattr(target_location, "longitude", None)
+            if t_lat is not None and t_lon is not None:
+                try:
+                    if self._is_sri_lanka_coords(float(t_lat), float(t_lon)):
+                        return True
+                except (ValueError, TypeError):
+                    pass
+            loc_str = str(getattr(target_location, "name", None) or getattr(target_location, "location_name", "")).strip().lower()
+        elif isinstance(target_location, dict):
+            t_lat = target_location.get("latitude", target_location.get("lat"))
+            t_lon = target_location.get("longitude", target_location.get("lon"))
+            if t_lat is not None and t_lon is not None:
+                try:
+                    if self._is_sri_lanka_coords(float(t_lat), float(t_lon)):
+                        return True
+                except (ValueError, TypeError):
+                    pass
+            loc_str = str(target_location.get("name") or target_location.get("location_name") or "").strip().lower()
+        else:
+            loc_str = str(target_location).strip().lower()
+
         if any(k in loc_str for k in foreign_keywords):
             return True
 
@@ -569,8 +619,14 @@ class GisAgent:
 
         # Location Unresolvable / Missing check
         if sector.get("is_unknown") or lat is None or lon is None:
+            resolved_name = (
+                getattr(target_location, "name", None)
+                or getattr(target_location, "location_name", None)
+                or (target_location.get("name") if isinstance(target_location, dict) else None)
+                or (str(target_location) if target_location is not None else "Location Required")
+            )
             return {
-                "target_location": str(target_location) if target_location is not None else "Location Required",
+                "target_location": self._serialize_target_location(target_location, sector) or "Location Required",
                 "coordinates": {"lat": None, "lon": None},
                 "distance_to_imbl_nm": 0.0,
                 "distance_to_imbl_km": 0.0,
@@ -578,7 +634,7 @@ class GisAgent:
                 "is_within_eez": False,
                 "status_flag": "LOCATION_REQUIRED",
                 "compliance_status": "LOCATION_REQUIRED",
-                "advisory": f"Geographic location '{target_location}' could not be resolved. Border monitoring and EEZ verification require a recognized coastal port or valid GPS coordinates.",
+                "advisory": f"Geographic location '{resolved_name}' could not be resolved. Border monitoring and EEZ verification require a recognized coastal port or valid GPS coordinates.",
                 "shipping_lane": {
                     "inside_lane": False,
                     "nearest_lane_name": "Unknown",
@@ -593,7 +649,7 @@ class GisAgent:
         # Out-of-Operational-Domain check
         if sector.get("out_of_operational_domain") or not (-15.0 <= lat <= 30.0 and 50.0 <= lon <= 105.0):
             return {
-                "target_location": str(target_location),
+                "target_location": self._serialize_target_location(target_location, sector),
                 "coordinates": {"lat": lat, "lon": lon},
                 "distance_to_imbl_nm": dist_nm,
                 "distance_to_imbl_km": round(dist_nm * 1.852, 2) if dist_nm < 9000 else 9999.0,
@@ -649,7 +705,7 @@ class GisAgent:
         shipping_lane = self.check_shipping_lane_proximity(lat, lon)
 
         return {
-            "target_location": target_location,
+            "target_location": self._serialize_target_location(target_location, sector),
             "coordinates": {"lat": lat, "lon": lon},
             "distance_to_imbl_nm": dist_nm,
             "distance_to_imbl_km": round(dist_nm * 1.852, 2),
@@ -1121,6 +1177,8 @@ class GisAgent:
 
         min_border = min(wp["border_clearance_nm"] for wp in waypoints)
         return {
+            "origin": orig_sector.get("name") or str(origin),
+            "destination": dest_sector.get("name") or str(destination),
             "route_status": "SAFE_PASSAGE_PLAN",
             "total_distance_nm": total_dist,
             "estimated_duration_hours": round(total_time_min / 60.0, 2),
@@ -1737,7 +1795,7 @@ def resolve_ocean_target(
         else:
             dest_cand = outputs.get("destination") or outputs.get("target_location")
             if dest_cand:
-                sec = gis.resolve_location(str(dest_cand))
+                sec = gis.resolve_location(dest_cand)
                 if sec.get("lat") is not None and sec.get("lon") is not None:
                     target_lat = float(sec["lat"])
                     target_lon = float(sec["lon"])

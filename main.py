@@ -16,7 +16,6 @@ import re
 import sys
 import time
 import datetime
-import random
 import warnings
 from typing import Dict, Any, List, Optional, Union, Tuple
 from dotenv import load_dotenv
@@ -184,11 +183,20 @@ def classify_marine_query_intent(query_text: str) -> Dict[str, Any]:
     )
     if is_route_passage:
         sub_intent = "SAFE_ROUTE" if "safe" in q else "ROUTE_PLANNING"
+        locs = extract_locations_from_query(query_text)
+        orig = locs.get("origin")
+        dest = locs.get("destination")
+        if orig and dest:
+            gis_instr = f"Generate safe sea passage route from {orig} to {dest}."
+        elif dest:
+            gis_instr = f"Generate safe sea passage route to {dest}."
+        else:
+            gis_instr = "Check EEZ boundary, shipping lanes, and navigation corridor."
         return {
             "intent": sub_intent,
             "urgency": "MEDIUM",
             "plan": [
-                {"agent_name": "GIS_AGENT", "task_instructions": "Check EEZ boundary, shipping lanes, and navigation corridor.", "expected_output_format": "GEOJSON_POLYGONS"},
+                {"agent_name": "GIS_AGENT", "task_instructions": gis_instr, "expected_output_format": "GEOJSON_POLYGONS"},
                 {"agent_name": "WEATHER_AGENT", "task_instructions": "Check wind speed, wave height, and visibility along corridor.", "expected_output_format": "TEXT_SUMMARY"},
                 {"agent_name": "OCEAN_AGENT", "task_instructions": "Check SWH altimetry and currents along route.", "expected_output_format": "TEXT_SUMMARY"},
                 {"agent_name": "DISASTER_AGENT", "task_instructions": "Check cyclone track and storm hazards along route.", "expected_output_format": "TEXT_SUMMARY"},
@@ -1424,6 +1432,7 @@ def process_marine_request(
     ) or clean_eng_lower.startswith("hi ") or clean_eng_lower.startswith("hello ")
 
     if is_greeting:
+        from decision_engine import compute_live_green_energy
         if resolved_persona_enum is None:
             resolved_persona_enum = classify_persona_intent(english_text) or StakeholderPersona.FISHERMAN
         persona = resolved_persona_enum.value
@@ -1473,12 +1482,7 @@ def process_marine_request(
             "native_advisory_text": native_advisory,
             "audio_payload_base64": audio_payload_base64,
             "safe_sea_route": None,
-            "green_marine_energy": {
-                "solar_irradiance_wm2": random.randint(700, 950),
-                "extended_zero_emission_hours": 3.5,
-                "fuel_saved_liters": 0.0,
-                "carbon_offset_kg": 0.0
-            },
+            "green_marine_energy": compute_live_green_energy(lat=lat, lon=lon),
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
         }
 
@@ -1764,11 +1768,35 @@ def process_marine_request(
         dispatched_results["destination"] = dest_info.get("name")
         dispatched_results["target_location"] = dest_info.get("name")
 
+    analyzed_intent_upper = (orchestration_result.get("analyzed_intent") or "").upper()
+    non_route_intents = (
+        "MARITIME_BOUNDARY", "EEZ", "CYCLONE", "DISASTER", "WEATHER",
+        "OCEAN", "OCEAN_CONDITIONS", "SEA_CONDITIONS", "PFZ", "FISHING", "GENERAL", "GENERAL_MARINE"
+    )
+    eng_lower = english_text.lower().strip()
+    has_explicit_route_keyword = (
+        any(k in eng_lower for k in ["safe route", "give me a route", "route from", "best route", "alternative route", "recommend a route", "sail from", "navigate to", "passage from"])
+        or (re.search(r"\b(navigate|sail|route|passage)\s+to\s+colombo\b", eng_lower) is not None)
+        or ("route" in eng_lower and "from " in eng_lower and " to " in eng_lower)
+    )
+    is_route_intent = (
+        analyzed_intent_upper in ("ROUTE", "SAFE_ROUTE", "ROUTE_PLANNING")
+        or (has_explicit_route_keyword and analyzed_intent_upper not in non_route_intents)
+    )
+
     # Dynamically execute only domain agents specified in the execution plan
     for step in plan:
         ag_name = step.get("agent_name")
         t_instr = step.get("task_instructions", "")
         exp_fmt = step.get("expected_output_format", "TEXT_SUMMARY")
+
+        if ag_name == "GIS_AGENT":
+            orig_name = origin_info.get("name") if origin_info else (location_context.name or (f"{location_context.latitude:.4f},{location_context.longitude:.4f}" if location_context.latitude is not None else None))
+            dest_name = dest_info.get("name") if dest_info else (dispatched_results.get("destination") or dispatched_results.get("target_location"))
+            if (is_route_intent or (origin_info and dest_info)) and orig_name and dest_name:
+                t_instr = f"Generate safe sea passage route from {orig_name} to {dest_name}."
+            elif (is_route_intent or dest_info) and dest_name:
+                t_instr = f"Generate safe sea passage route to {dest_name}."
 
         agent_instance = agent_registry.get(ag_name)
         if agent_instance and ag_name not in dispatched_results:

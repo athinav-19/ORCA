@@ -240,7 +240,7 @@ class WeatherAgent:
             "visibility_km": visibility_km,
             "fog_cover_fraction": fog_cover,
             "pressure_hpa": pressure_hpa,
-            "surface_temp_c": 27.5,
+            "surface_temp_c": None,
             "solar_insolation_wm2": insolation_wm2,
             "solar_daily_kwh_m2": solar_daily_kwh,
             "scatterometer_source": wnd_source or "Oceansat-3 Scatterometer",
